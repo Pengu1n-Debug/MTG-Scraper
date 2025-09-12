@@ -39,8 +39,6 @@ EBAY_HEADERS = {
     "DNT": "1",
 }
 
-
-# --------------------------- Moon MTG (unchanged) --------------------------- #
 class MoonMTGScraper:
     BASE_URL = 'https://moonmtg.com/products/'
 
@@ -109,7 +107,6 @@ class MoonMTGScraper:
         return (price, title, f'{self.BASE_URL}{handle}?variant={variant_id}')
 
 
-# --------------------------- MTGMate (unchanged) --------------------------- #
 def fetch_mtgmate_price(card_name):
     from playwright.sync_api import sync_playwright
     from urllib.parse import quote
@@ -123,7 +120,6 @@ def fetch_mtgmate_price(card_name):
 
     try:
         with sync_playwright() as p:
-            # Stealth browser launch with anti-detection measures
             browser = p.chromium.launch(
                 headless=True,
                 args=[
