@@ -17,7 +17,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from concurrent.futures import ThreadPoolExecutor
 from openpyxl import Workbook
-from playwright.sync_api import sync_playwright   # NEW import
+from playwright.sync_api import sync_playwright
 
 SORTING_MAP = {'best_match': 12}
 session = httpx.Client(headers={
@@ -39,10 +39,13 @@ EBAY_HEADERS = {
     "DNT": "1",
 }
 
-class MoonMTGScraper:
+def scrape_moonmtg(card_name):
     BASE_URL = 'https://moonmtg.com/products/'
+    import re
+    import requests
+    from bs4 import BeautifulSoup
 
-    def name_to_handle(self, card_name):
+    def name_to_handle(card_name):
         handle = card_name.lower()
         handle = re.sub(r"[’'\":,?!()]", '', handle)
         handle = re.sub(r'[^a-z0-9\s-]', '', handle)
@@ -50,14 +53,14 @@ class MoonMTGScraper:
         handle = handle.strip('-')
         return handle
 
-    def normalize_name(self, name):
+    def normalize_name(name):
         name = name.lower()
         name = re.sub(r"[’'\":,?!()]", '', name)
         name = re.sub(r'[^a-z0-9\s]', '', name)
         return name.strip()
 
-    def fetch_product_json(self, handle):
-        url = f'{self.BASE_URL}{handle}.json'
+    def fetch_product_json(handle):
+        url = f'{BASE_URL}{handle}.json'
         try:
             response = requests.get(url)
             if response.status_code == 200:
@@ -66,8 +69,8 @@ class MoonMTGScraper:
             pass
         return None
 
-    def fetch_variant_stock(self, handle, variant_id):
-        variant_url = f'{self.BASE_URL}{handle}?variant={variant_id}'
+    def fetch_variant_stock(handle, variant_id):
+        variant_url = f'{BASE_URL}{handle}?variant={variant_id}'
         try:
             response = requests.get(variant_url)
             if response.status_code != 200:
@@ -78,34 +81,32 @@ class MoonMTGScraper:
         except:
             return 'Unknown'
 
-    def get_cheapest_price(self, card_name):
-        handle = self.name_to_handle(card_name)
-        product_json = self.fetch_product_json(handle)
-        success = False
-        if product_json:
-            product = product_json['product']
-            if self.normalize_name(card_name) in self.normalize_name(product['title']):
-                success = True
-        if not success:
-            handle += '-1'
-            product_json = self.fetch_product_json(handle)
-            if not product_json:
-                return (0.0, 'Not found', '')
-            product = product_json['product']
-            if self.normalize_name(card_name) not in self.normalize_name(product['title']):
-                return (0.0, 'Not found', '')
-        in_stock_variants = []
-        for variant in product['variants']:
-            price = float(variant['price'])
-            variant_id = variant['id']
-            stock_status = self.fetch_variant_stock(handle, variant_id)
-            if stock_status not in ['Out of stock', 'Stock info not found', 'Unknown']:
-                in_stock_variants.append((variant['title'], price, variant_id))
-        if not in_stock_variants:
-            return (0.0, 'Out of stock', '')
-        title, price, variant_id = sorted(in_stock_variants, key=lambda x: x[1])[0]
-        return (price, title, f'{self.BASE_URL}{handle}?variant={variant_id}')
-
+    handle = name_to_handle(card_name)
+    product_json = fetch_product_json(handle)
+    success = False
+    if product_json:
+        product = product_json['product']
+        if normalize_name(card_name) in normalize_name(product['title']):
+            success = True
+    if not success:
+        handle += '-1'
+        product_json = fetch_product_json(handle)
+        if not product_json:
+            return (0.0, 'Not found', '')
+        product = product_json['product']
+        if normalize_name(card_name) not in normalize_name(product['title']):
+            return (0.0, 'Not found', '')
+    in_stock_variants = []
+    for variant in product['variants']:
+        price = float(variant['price'])
+        variant_id = variant['id']
+        stock_status = fetch_variant_stock(handle, variant_id)
+        if stock_status not in ['Out of stock', 'Stock info not found', 'Unknown']:
+            in_stock_variants.append((variant['title'], price, variant_id))
+    if not in_stock_variants:
+        return (0.0, 'Out of stock', '')
+    title, price, variant_id = sorted(in_stock_variants, key=lambda x: x[1])[0]
+    return (price, title, f'{BASE_URL}{handle}?variant={variant_id}')
 
 def fetch_mtgmate_price(card_name):
     from playwright.sync_api import sync_playwright
@@ -138,7 +139,6 @@ def fetch_mtgmate_price(card_name):
                 ]
             )
             
-            # Realistic browser context
             context = browser.new_context(
                 viewport={"width": random.randint(1200, 1920), "height": random.randint(800, 1080)},
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -164,7 +164,6 @@ def fetch_mtgmate_price(card_name):
             
             page = context.new_page()
             
-            # Remove automation indicators and add human-like properties
             page.add_init_script("""
                 // Remove webdriver property
                 Object.defineProperty(navigator, 'webdriver', {
@@ -202,30 +201,25 @@ def fetch_mtgmate_price(card_name):
                 });
             """)
             
-            # Random delay before navigation (human behavior)
             time.sleep(random.uniform(1.5, 3.5))
             
-            # Navigate with realistic options
             page.goto(url, timeout=30000, wait_until='domcontentloaded')
             
-            # Wait for page load with random human-like delay
             page.wait_for_timeout(random.randint(2000, 4000))
             
-            # Simulate human scrolling behavior
             page.evaluate("""
                 window.scrollTo(0, Math.floor(Math.random() * 200));
                 setTimeout(() => window.scrollTo(0, 0), 500);
             """)
             
-            # Additional wait for any dynamic content
             page.wait_for_timeout(random.randint(1000, 2000))
             
             html = page.content()
             browser.close()
 
         soup = BeautifulSoup(html, "html.parser")
-        page_text = soup.get_text(separator=' ', strip=True)
-        print(f"[MTGMate] Page text preview:\n{page_text[:500]}")
+
+        page_text = soup.get_text()
 
         matches = re.findall(r"\$\d+(?:\.\d{2})?", page_text)
         print(f"[MTGMate] Found price strings: {matches}")
@@ -233,21 +227,18 @@ def fetch_mtgmate_price(card_name):
         prices = [float(p.strip('$').replace(',', '')) for p in matches]
 
         if not prices:
-            print("[MTGMate] ❌ No price matches found.")
+            print("[MTGMate] No price matches found.")
             return (0.0, 'Not found', '')
 
         cheapest = min(prices)
-        print(f"[MTGMate] ✅ Cheapest price: ${cheapest:.2f}")
+        print(f"[MTGMate] Cheapest price: ${cheapest:.2f}")
         return (cheapest, f"{card_name} (MTGMate)", url)
 
     except Exception as e:
         print(f"[MTGMate ERROR] {e}")
         return (0.0, 'Error', '')
 
-
-
-# --------------------------- Good Games (unchanged) --------------------------- #
-def scrape_goodgames(card_name, base_url="https://ggadelaide.com.au"):
+def scrape_gg(card_name, base_url):
     def normalize(text):
         text = text.lower()
         text = re.sub(r"[’'\":,?!()\[\]]", "", text)
@@ -261,8 +252,8 @@ def scrape_goodgames(card_name, base_url="https://ggadelaide.com.au"):
     url = f"{base_url}/search?q={query}"
     headers = {"User-Agent": "Mozilla/5.0"}
 
-    print(f"\n[GoodGames] Searching for: {card_name}")
-    print(f"[DEBUG] Visiting URL: {url}")
+    print(f"\n[GG] Searching for: {card_name}")
+    print(f"[GG] Visiting URL: {url}")
 
     try:
         response = requests.get(url, headers=headers, timeout=15)
@@ -271,7 +262,7 @@ def scrape_goodgames(card_name, base_url="https://ggadelaide.com.au"):
 
         results = []
         items = soup.select("div.addNow.single")
-        print(f"[DEBUG] Found {len(items)} product blocks")
+        print(f"[GG] Found {len(items)} product blocks")
 
         for idx, div in enumerate(items, 1):
             onclick = div.get("onclick", "")
@@ -286,29 +277,25 @@ def scrape_goodgames(card_name, base_url="https://ggadelaide.com.au"):
             title_norm = normalize(title)
             title_first = title_norm.split()[0] if title_norm else ""
 
-            print(f"[DEBUG] #{idx} Title: {title} | Price: {price_text} | Parsed: {price}")
+            print(f"[GG] #{idx} Title: {title} | Price: {price_text} | Parsed: {price}")
             if title_first != target_first:
-                print(f"[DEBUG] Skipping: '{title_first}' != '{target_first}'")
+                print(f"[GG] Skipping: '{title_first}' != '{target_first}'")
                 continue
 
             results.append((price, title, url))
 
         if not results:
-            print("[DEBUG] ❌ No valid GoodGames results found")
+            print("[GG] No valid GoodGames results found")
             return 0.0, "Out of stock", ""
 
         cheapest = min(results, key=lambda x: x[0])
-        print(f"[DEBUG] ✅ Cheapest GoodGames: {cheapest}")
+        print(f"[GG] Cheapest GoodGames: {cheapest}")
         return cheapest
 
     except Exception as e:
-        print(f"[GoodGames ERROR] {e}")
+        print(f"[GG] {e}")
         return 0.0, "Error", ""
 
-
-
-
-# --------------------------- NEW: CardHub Australia --------------------------- #
 def clean_name(title: str) -> str:
     """Base card name: part before first '(' or '[' – lowercase, trimmed."""
     base = re.split(r'[\(\[]', title, 1)[0]
@@ -335,13 +322,13 @@ def scrape_cardhub(card_name):
         results = []
         items = soup.select("div.h4.grid-view-item__title")
         print(f"[CardHub] Searching for: {card_name}")
-        print(f"[DEBUG] Found {len(items)} product titles")
+        print(f"[CardHub] Found {len(items)} product titles")
 
         for idx, title_div in enumerate(items, 1):
             title = title_div.get_text(strip=True)
             price_tag = title_div.find_next("span", class_="product-price__price")
             if not price_tag:
-                print(f"[DEBUG] Skipping #{idx}, no price tag")
+                print(f"[CardHub Error] Skipping #{idx}, no price tag")
                 continue
 
             price_match = re.search(r"\$([\d.,]+)", price_tag.get_text())
@@ -349,13 +336,12 @@ def scrape_cardhub(card_name):
                 continue
             price = float(price_match.group(1).replace(",", ""))
 
-            # normalize comparison
-            title_norm = normalize(title.split("(")[0].split("[")[0])  # just base name
+            title_norm = normalize(title.split("(")[0].split("[")[0])
             title_first = title_norm.split()[0] if title_norm else ""
 
-            print(f"[DEBUG] #{idx} Title: {title} | Price: {price}")
+            print(f"[CardHub] #{idx} Title: {title} | Price: {price}")
             if title_first != target_first:
-                print(f"[DEBUG] Skipping: '{title_first}' != '{target_first}'")
+                print(f"[CardHub] Skipping: '{title_first}' != '{target_first}'")
                 continue
 
             link_tag = title_div.find_parent("a")
@@ -366,22 +352,17 @@ def scrape_cardhub(card_name):
             results.append((price, title, link))
 
         if not results:
-            print("[DEBUG] ❌ No valid CardHub results found")
+            print("[CardHub] No valid CardHub results found")
             return 0.0, "Out of stock", ""
 
         cheapest = min(results, key=lambda x: x[0])
-        print(f"[DEBUG] ✅ Cheapest CardHub: {cheapest}")
+        print(f"[CardHub] Cheapest CardHub: {cheapest}")
         return cheapest
 
     except Exception as e:
-        print(f"[CardHub ERROR] {e}")
+        print(f"[CardHub] {e}")
         return 0.0, "Error", ""
 
-
-
-
-
-# --------------------------- eBay (unchanged) --------------------------- #
 def parse_ebay_search(response):
     previews = []
     sel = Selector(response.text)
@@ -444,7 +425,6 @@ def scrape_ebay(cardname):
     
     print(f"\n[eBay] Fetching: {url}")
     
-    # Enhanced session with rotation and delays
     enhanced_headers = {
         'User-Agent': random.choice([
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -462,10 +442,8 @@ def scrape_ebay(cardname):
     }
     
     try:
-        # Add random delay to appear more human
         time.sleep(random.uniform(1, 3))
         
-        # Try with enhanced session first
         print("[eBay] Trying enhanced session method...")
         enhanced_session = httpx.Client(
             headers=enhanced_headers,
@@ -477,7 +455,6 @@ def scrape_ebay(cardname):
         response = enhanced_session.get(url)
         enhanced_session.close()
         
-        # Check for blocking
         if 'captcha' in response.text.lower() or 'blocked' in response.text.lower():
             print("[eBay] Enhanced session got blocked, trying original session...")
             time.sleep(random.uniform(2, 5))
@@ -498,18 +475,20 @@ def scrape_ebay(cardname):
         return (0.0, 'Error', '')
 
 
+def scrape_ggadelaide(card_name: str):
+    return scrape_gg(card_name, base_url="https://ggadelaide.com.au")
 
 
 def scrape_ggmodbury(card_name: str):
-    return scrape_goodgames(card_name, base_url="https://ggmodbury.com.au")
+    return scrape_gg(card_name, base_url="https://ggmodbury.com.au")
 
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
-
-
-def scrape_ggtcg(card_name: str):
+def scrape_ggaustralia(card_name: str):
     def normalize(name: str) -> str:
-        # Only compare the base name (strip out things like " (Foil)", "[Set Name]", etc.)
-        name = re.split(r'[\(\[]', name)[0]  # Split at ( or [ and keep the first part
+        name = re.split(r'[\(\[]', name)[0]
         name = name.lower()
         name = re.sub(r"[’'\":,?!()\[\]]", "", name)
         name = re.sub(r"[^a-z0-9\s\-]", "", name)
@@ -523,49 +502,46 @@ def scrape_ggtcg(card_name: str):
         f"&s=-isActive,new_discounted_price,-_rank&f_Availability=Exclude+Out+Of+Stock"
     )
 
-    print(f"\n[GGTCG] Searching for: {card_name}")
-    print(f"[DEBUG] Visiting URL: {url}")
+    print(f"\n[GGAustralia] Searching for: {card_name}")
+    print(f"[GGAustralia] Visiting URL: {url}")
 
     try:
-        with sync_playwright() as p:
-            # Define this once globally or inside the function
-            def get_chrome_path():
-                if hasattr(sys, '_MEIPASS'):
-                    base_path = sys._MEIPASS  # For PyInstaller bundles
-                else:
-                    base_path = os.path.abspath(".")  # When running as script
-                return os.path.join(base_path, "chromium-1169", "chrome-win", "chrome.exe")
+        options = Options()
+        options.add_argument("--headless=new")   
+        options.add_argument("--disable-gpu")
+        options.add_argument("--no-sandbox")
 
-            # Launch browser
-            browser = p.chromium.launch(executable_path=get_chrome_path(), headless=True)
-            page = browser.new_page()
+        driver = webdriver.Chrome(options=options)
+        driver.get(url)
 
-            try:
-                page.goto(url, timeout=15000)
-                page.wait_for_selector(".st-product", timeout=10000)
-            except Exception as e:
-                print(f"[DEBUG] Price elements did not appear in time. ({e})")
-                browser.close()
-                return 0.0, "No results", ""
+        try:
+            WebDriverWait(driver, 12).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, ".st-product"))
+            )
+        except Exception:
+            print("[GGAustralia] Product containers did not appear in time.")
 
-            content = page.content()
-            browser.close()
-
-        soup = BeautifulSoup(content, "html.parser")
+        soup = BeautifulSoup(driver.page_source, "html.parser")
         product_containers = soup.select(".st-product")
-        print(f"[DEBUG] Found {len(product_containers)} product containers")
+
+        if not product_containers:
+            print("[GGAustralia] No product containers found. Page source preview:")
+            print(driver.page_source[:2000])  
+
+        driver.quit()
+
+        print(f"[GGAustralia] Found {len(product_containers)} product containers")
 
         results = []
-
         for i, prod in enumerate(product_containers, 1):
-            print(f"\n[DEBUG] --- Product #{i} ---")
+            print(f"\n[GGAustralia] --- Product #{i} ---")
 
             title_tag = prod.select_one(".product-title span")
             title = title_tag.get_text(strip=True) if title_tag else "N/A"
             normalized_title = normalize(title)
 
             if normalized_title != target_normalized:
-                print(f"[DEBUG] Skipping: '{title}' does not match '{card_name}'")
+                print(f"[GGAustralia] Skipping: '{title}' does not match '{card_name}'")
                 continue
 
             price_tag = (
@@ -582,17 +558,17 @@ def scrape_ggtcg(card_name: str):
                 else "https://tcg.goodgames.com.au"
             )
 
-            print(f"[DEBUG] Title: {title}")
-            print(f"[DEBUG] Price: {price_str}")
-            print(f"[DEBUG] Link: {link}")
+            print(f"[GGAustralia] Title: {title}")
+            print(f"[GGAustralia] Price: {price_str}")
+            print(f"[GGAustralia] Link: {link}")
 
             if not (title and price_str and link):
-                print("[DEBUG] Skipping: Missing required info.")
+                print("[GGAustralia] Skipping: Missing required info.")
                 continue
 
             match = re.search(r"\$([\d,]+\.\d{2})", price_str)
             if not match:
-                print(f"[DEBUG] Couldn't parse numeric price from: {price_str}")
+                print(f"[GGAustralia] Couldn't parse numeric price from: {price_str}")
                 continue
 
             price = float(match.group(1).replace(",", ""))
@@ -602,20 +578,16 @@ def scrape_ggtcg(card_name: str):
             results.append((price, title, link))
 
         if not results:
-            print("[DEBUG] ❌ No valid matching products with parsable price.")
+            print("[GGAustralia] No valid matching products with parsable price.")
             return 0.0, "No valid match", ""
 
-        # Return the cheapest valid match
         cheapest = min(results, key=lambda x: x[0])
         return cheapest
 
     except Exception as e:
-        print(f"[GGTCG scrape error]: {e}")
+        print(f"[GGAustralia scrape error]: {e}")
         return 0.0, "Error", ""
 
-
-
-# --------------------------- Utility + GUI --------------------------- #
 def parse_decklist_from_input(text):
     cards = []
     for line in text.strip().splitlines():
@@ -631,40 +603,36 @@ def parse_decklist_from_input(text):
 
 SCRAPER_CONFIG = {
     "eBay": {"enabled": True, "func": scrape_ebay},
-    "Moon MTG": {"enabled": True, "func": lambda card: MoonMTGScraper().get_cheapest_price(card)},
+    "MoonMTG": {"enabled": True, "func": scrape_moonmtg}, 
     "MTGMate": {"enabled": True, "func": fetch_mtgmate_price},
-    "Good Games": {"enabled": True, "func": scrape_goodgames},
     "CardHub": {"enabled": True, "func": scrape_cardhub},
-    "GGTCG": {"enabled": True, "func": scrape_ggtcg},
+    "GGAustralia": {"enabled": True, "func": scrape_ggaustralia},
     "GGModbury": {"enabled": True, "func": scrape_ggmodbury},
+    "GGAdelaide": {"enabled": True, "func": scrape_ggadelaide},
 }
 
 SOURCE_TO_COLUMN = {
     "eBay": "eBay",
-    "Moon MTG": "Moon",
+    "MoonMTG": "Moon",
     "MTGMate": "MTGMate",
-    "Good Games": "GoodGames",
     "CardHub": "CardHub",
-    "GGTCG": "GGTCG",
+    "GGAustralia": "GGTCG",
     "GGModbury": "GGModbury",
+    "GGAdelaide": "GoodGames",
 }
 
 class MTGScraperGUI:
     def __init__(self, root):
-   
         self.root = root
         self.root.title(
-            "MTG Price Checker (eBay • Moon • MTGMate • GoodGames • CardHub • GGTCG)"
+            "MTG Price Checker (eBay • MoonMTG • MTGMate • CardHub • GGAustralia • GGAdelaide • GGModbury)"
         )
         self.card_urls = {}
         self.stop_flag = False
-        self.moon_scraper = MoonMTGScraper()
 
         input_frame = tk.Frame(root)
         input_frame.pack(fill='x', padx=5, pady=5)
 
-
-        # ----- Missing Cards Sidebar -----
         missing_frame = tk.Frame(input_frame)
         missing_frame.pack(side='left', padx=5, pady=5, anchor='n')
 
@@ -676,7 +644,6 @@ class MTGScraperGUI:
         missing_scroll.pack(side='right', fill='y')
         self.missing_listbox.config(yscrollcommand=missing_scroll.set)
 
-        # ----- Deck List Input (left) -----
         text_frame = tk.Frame(input_frame)
         text_frame.pack(side='left', fill='both', expand=True)
 
@@ -684,7 +651,6 @@ class MTGScraperGUI:
         self.text_input = tk.Text(text_frame, height=10, width=60, wrap='word')
         self.text_input.pack(pady=2, padx=2, fill='both', expand=True)
 
-        # ----- Button Dropdown Panel (right) -----
         dropdown_frame = tk.LabelFrame(input_frame, text="Open Cheapest Options")
         dropdown_frame.pack(side='right', fill='y', padx=5)
 
@@ -713,7 +679,6 @@ class MTGScraperGUI:
         frame = tk.Frame(root)
         frame.pack(padx=5, pady=5, fill='both', expand=True)
 
-        # Toggle source checkboxes
         self.source_vars = {}
         toggle_frame = tk.Frame(root)
         toggle_frame.pack(pady=5)
@@ -724,11 +689,9 @@ class MTGScraperGUI:
             cb.pack(side=tk.LEFT, padx=3)
             self.source_vars[source] = var
 
-        # Added CardHub column
         self.tree = ttk.Treeview(
             frame,
-            columns=('Card', 'eBay', 'Moon', 'MTGMate', 'GoodGames', 'CardHub', 'GGTCG', 'GGModbury', 'Cheapest'),
-
+            columns=('Card',) + tuple(SCRAPER_CONFIG.keys()) + ('Cheapest',),
             show='headings'
         )
         for col in self.tree['columns']:
@@ -785,7 +748,6 @@ class MTGScraperGUI:
 
         self.total_label.config(text=f"Total: AU ${total:.2f}")
 
-        # 🔁 Update Missing Cards Listbox
         self.missing_listbox.delete(0, tk.END)
         for card in sorted(set(missing_cards)):
             self.missing_listbox.insert(tk.END, card)
@@ -852,7 +814,6 @@ class MTGScraperGUI:
             else:
                 display_data[name] = "--"
 
-        # Determine cheapest
         cheapest_price = min((p for _, p in prices if p > 0), default=0.0)
         cheapest_url = next((u for n, u in urls if n in results and results[n][0] == cheapest_price), '')
     
@@ -910,8 +871,6 @@ class MTGScraperGUI:
 
             card, display_data, cheapest, url, results = self.fetch_card_prices_parallel(card)
 
-
-            # Build the row dynamically
             row = [card]
             for source in SCRAPER_CONFIG:
                 row.append(display_data.get(source, "--"))
@@ -963,7 +922,7 @@ class MTGScraperGUI:
         for row_id in self.tree.get_children():
             row = self.tree.item(row_id)['values']
             card = row[0]
-            cheapest_price = row[len(SCRAPER_CONFIG) + 1]  # +1 for 'Card' column
+            cheapest_price = row[len(SCRAPER_CONFIG) + 1] 
             urls = self.card_urls.get(card, {})
             url = urls.get("Cheapest", "")
 
@@ -971,7 +930,7 @@ class MTGScraperGUI:
             if url:
                 for name in SCRAPER_CONFIG:
                     if any(substring in url for substring in [
-                        "ebay", "moonmtg", "mtgmate", "ggadelaide", "cardhub", "thecardhubaustralia", "goodgames.com.au"
+                        "ebay", "moonmtg", "mtgmate", "cardhub", "ggadelaide", "ggmodbury", "goodgames.com.au"
                     ]):
                         if name.lower().replace(" ", "") in url.replace("www.", "").lower():
                             source = name
