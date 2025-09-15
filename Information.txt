@@ -1,2 +1,7 @@
 This is the MTG Scraper
 i love hog
+
+Issues with search results:
+    Three Tree City found a Three Tree Mascot result instead.
+
+Card Hub returned out of stock items
