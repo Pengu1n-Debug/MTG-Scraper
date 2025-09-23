@@ -7,6 +7,7 @@ os.environ["PLAYWRIGHT_BROWSERS_PATH"] = r"C:\Users\kaden\PlaywrightBrowsers"
 import datetime
 import sys
 from urllib.parse import urlencode, quote, quote_plus
+import cloudscraper
 from bs4 import BeautifulSoup
 from parsel import Selector
 import tkinter as tk
@@ -99,135 +100,66 @@ def scrape_moonmtg(card_name):
     title, price, variant_id = sorted(in_stock_variants, key=lambda x: x[1])[0]
     return (price, title, f'{BASE_URL}{handle}?variant={variant_id}')
 
-def fetch_mtgmate_price(card_name):
-    from playwright.sync_api import sync_playwright
-    from urllib.parse import quote
-    import re
-    from bs4 import BeautifulSoup
-    import random
-    import time
-
-    url = f"https://www.mtgmate.com.au/cards/{quote(card_name)}"
-    print(f"\n[MTGMate] Fetching: {url}")
+def fetch_mtgmate_price(card_name: str):
+    """
+    Scrape MTGMate search results for a given card.
+    Returns (cheapest_price, title, url) like other scrapers.
+    """
+    url = f"https://www.mtgmate.com.au/cards/search?q={card_name.replace(' ', '+')}"
+    scraper = cloudscraper.create_scraper()
 
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-web-security',
-                    '--disable-features=VizDisplayCompositor',
-                    '--no-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--disable-extensions',
-                    '--no-first-run',
-                    '--disable-default-apps',
-                    '--disable-background-networking',
-                    '--disable-background-timer-throttling',
-                    '--disable-renderer-backgrounding'
-                ]
-            )
-            
-            context = browser.new_context(
-                viewport={"width": random.randint(1200, 1920), "height": random.randint(800, 1080)},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                locale="en-AU",
-                timezone_id="Australia/Sydney",
-                extra_http_headers={
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                    'Accept-Language': 'en-AU,en;q=0.9,en-US;q=0.8',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Cache-Control': 'max-age=0',
-                    'DNT': '1',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none',
-                    'Sec-Fetch-User': '?1',
-                    'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-                    'sec-ch-ua-mobile': '?0',
-                    'sec-ch-ua-platform': '"Windows"'
-                }
-            )
-            
-            page = context.new_page()
-            
-            page.add_init_script("""
-                // Remove webdriver property
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined,
-                });
-                
-                // Remove chrome automation indicators
-                delete window.chrome;
-                
-                // Mock permissions API
-                Object.defineProperty(navigator, 'permissions', {
-                    get: () => ({
-                        query: () => Promise.resolve({ state: 'granted' })
-                    })
-                });
-                
-                // Add realistic plugins
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5]
-                });
-                
-                // Mock languages
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-AU', 'en', 'en-US']
-                });
-                
-                // Override automation detection
-                window.navigator.chrome = {
-                    runtime: {}
-                };
-                
-                // Remove automation flags
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => false,
-                });
-            """)
-            
-            time.sleep(random.uniform(1.5, 3.5))
-            
-            page.goto(url, timeout=30000, wait_until='domcontentloaded')
-            
-            page.wait_for_timeout(random.randint(2000, 4000))
-            
-            page.evaluate("""
-                window.scrollTo(0, Math.floor(Math.random() * 200));
-                setTimeout(() => window.scrollTo(0, 0), 500);
-            """)
-            
-            page.wait_for_timeout(random.randint(1000, 2000))
-            
-            html = page.content()
-            browser.close()
-
-        soup = BeautifulSoup(html, "html.parser")
-
-        page_text = soup.get_text()
-
-        matches = re.findall(r"\$\d+(?:\.\d{2})?", page_text)
-        print(f"[MTGMate] Found price strings: {matches}")
-
-        prices = [float(p.strip('$').replace(',', '')) for p in matches]
-
-        if not prices:
-            print("[MTGMate] No price matches found.")
-            return (0.0, 'Not found', '')
-
-        cheapest = min(prices)
-        print(f"[MTGMate] Cheapest price: ${cheapest:.2f}")
-        return (cheapest, f"{card_name} (MTGMate)", url)
-
+        r = scraper.get(url, timeout=20)
+        r.raise_for_status()
     except Exception as e:
-        print(f"[MTGMate ERROR] {e}")
-        return (0.0, 'Error', '')
+        print(f"[MTGMate] Request failed: {e}")
+        return (0.0, "Error", "")
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    container = soup.find("div", {"data-react-class": "FilterableTable"})
+    if not container:
+        print("[MTGMate] Could not find FilterableTable div.")
+        return (0.0, "Not found", "")
+
+    raw_props = container.get("data-react-props")
+    if not raw_props:
+        print("[MTGMate] No data-react-props found.")
+        return (0.0, "Not found", "")
+
+    try:
+        data = json.loads(raw_props)
+    except Exception as e:
+        print(f"[MTGMate] JSON parsing error: {e}")
+        return (0.0, "Error", "")
+
+    uuid_map = data.get("uuid", {})
+    results = []
+
+    for card in data.get("cards", []):
+        card_id = card.get("uuid")
+        details = uuid_map.get(card_id, {})
+        if not details:
+            continue
+
+        try:
+            price = int(details.get("price", 0)) / 100
+        except (TypeError, ValueError):
+            price = 0.0
+
+        qty = details.get("quantity", 0)
+        if price > 0 and qty > 0:
+            results.append((
+                price,
+                f"{details.get('name')} ({details.get('set_name')}, {details.get('finish')})",
+                f"https://www.mtgmate.com.au{details.get('link_path', '')}"
+            ))
+
+    if not results:
+        return (0.0, "Out of stock", "")
+
+    cheapest = min(results, key=lambda x: x[0])
+    print(f"[MTGMate] Cheapest: {cheapest}")
+    return cheapest
 
 def scrape_gg(card_name, base_url):
     def normalize(text):
@@ -297,7 +229,10 @@ import requests
 from bs4 import BeautifulSoup
 
 def scrape_cardhub(card_name):
-    def normalize(text):
+    import requests, re
+    from bs4 import BeautifulSoup
+
+    def normalize(text: str) -> str:
         text = text.lower()
         text = re.sub(r"[^a-z0-9\s-]", "", text)
         text = re.sub(r"\s+", " ", text)
@@ -314,61 +249,46 @@ def scrape_cardhub(card_name):
         soup = BeautifulSoup(response.text, "html.parser")
 
         results = []
-        items = soup.select("div.h4.grid-view-item__title")
+        items = soup.select("div.product-card-list2")
         print(f"[CardHub] Searching for: {card_name}")
-        print(f"[CardHub] Found {len(items)} product titles")
+        print(f"[CardHub] Found {len(items)} product cards")
 
-        for idx, title_div in enumerate(items, 1):
-            title = title_div.get_text(strip=True)
-            price_tag = title_div.find_next("span", class_="product-price__price")
-            if not price_tag:
-                print(f"[CardHub Error] Skipping #{idx}, no price tag")
+        for idx, card_div in enumerate(items, 1):
+            
+            title_tag = card_div.select_one(".grid-view-item__title")
+            if not title_tag:
+                continue
+            title = title_tag.get_text(strip=True)
+            title_norm = normalize(title.split("(")[0].split("[")[0])
+            if title_norm != target:
+                print(f"[CardHub] Skipping #{idx}, title mismatch: '{title_norm}' != '{target}'")
                 continue
 
+          
+            if card_div.select_one(".outstock-overlay") or "grid-view-item--sold-out" in card_div.get("class", []):
+                print(f"[CardHub] Skipping #{idx}, marked SOLD OUT: {title}")
+                continue
+
+           
+            price_tag = card_div.select_one(".product-price__price")
+            if not price_tag:
+                continue
             price_match = re.search(r"\$([\d.,]+)", price_tag.get_text())
             if not price_match:
                 continue
             price = float(price_match.group(1).replace(",", ""))
 
-            title_norm = normalize(title.split("(")[0].split("[")[0])
-
-            if title_norm != target:
-                print(f"[CardHub] Skipping #{idx}, title mismatch: '{title_norm}' != '{target}'")
-                continue
-
-            link_tag = title_div.find_parent("a")
+           
+            link_tag = card_div.select_one("a[href]")
             link = link_tag["href"] if link_tag else ""
             if link and not link.startswith("http"):
                 link = "https://thecardhubaustralia.com.au" + link
 
-            try:
-                product_resp = requests.get(link, headers=headers, timeout=15)
-                product_resp.raise_for_status()
-                product_soup = BeautifulSoup(product_resp.text, "html.parser")
-
-                if product_soup.select_one(".product-info.product-soldout"):
-                    print(f"[CardHub] Skipping #{idx}, product-soldout container found: {title}")
-                    continue
-
-                add_to_cart_btn = product_soup.select_one(".product-form__item--submit button")
-                if add_to_cart_btn:
-                    btn_text = add_to_cart_btn.get_text(strip=True).lower()
-                    is_disabled = add_to_cart_btn.has_attr("disabled")
-                    if "sold out" in btn_text or is_disabled:
-                        print(f"[CardHub] Skipping #{idx}, sold out via button: {title}")
-                        continue
-                else:
-                    print(f"[CardHub Warning] Could not find add-to-cart button on {link}")
-                    continue
-
-            except Exception as e:
-                print(f"[CardHub Error] Failed stock check for {link}: {e}")
-                continue
-
             results.append((price, title, link))
+            print(f"[CardHub] Added #{idx}: {title} | ${price:.2f}")
 
         if not results:
-            print("[CardHub] No valid CardHub results found")
+            print("[CardHub] No valid in-stock results found")
             return 0.0, "Out of stock", ""
 
         cheapest = min(results, key=lambda x: x[0])
@@ -376,9 +296,10 @@ def scrape_cardhub(card_name):
         return cheapest
 
     except Exception as e:
-        print(f"[CardHub] {e}")
+        print(f"[CardHub error] {e}")
         return 0.0, "Error", ""
 
+    
 def scrape_ggadelaide(card_name: str):
     return scrape_gg(card_name, base_url="https://ggadelaide.com.au")
 
