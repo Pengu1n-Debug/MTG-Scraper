@@ -365,48 +365,146 @@ def scrape_cardhub(card_name):
 
 def parse_ebay_search(response):
     previews = []
-    sel = Selector(response.text)
-    best_selling_boxes = sel.xpath(
-        '//*[*[h2[contains(text(),"Best selling products")]]]//li[contains(@class, "s-item")]'
-    )
-    best_selling_html_set = set([b.get() for b in best_selling_boxes])
-    for box in sel.css('.srp-results li.s-item'):
-        if box.get() in best_selling_html_set:
-            continue
-        css = lambda css: box.css(css).get('') or None
-        css_float = (
-            lambda css: float(box.css(css).re_first(r'(\d+\.*\d*)', default='0.0'))
-            if box.css(css)
-            else 0.0
+    
+    # Try multiple parsing strategies
+    try:
+        # Strategy 1: Original Parsel approach
+        sel = Selector(response.text)
+        best_selling_boxes = sel.xpath(
+            '//*[*[h2[contains(text(),"Best selling products")]]]//li[contains(@class, "s-item")]'
         )
-        href = box.css('a::attr(href)').get()
-        if not href or not href.startswith("http"):
-            continue
-        price = css_float('.s-item__price::text')
-        if price == 0.0 or price == 20.0:
-            continue
-        shipping = css_float('.s-item__shipping::text')
-        total = price + shipping
-        title = css('.s-item__title span::text')
-        if not title:
-            continue
-        title_lower = title.lower()
+        best_selling_html_set = set([b.get() for b in best_selling_boxes])
+        
+        items_found = sel.css('.srp-results li.s-item')
+        print(f"[eBay Parser] Strategy 1: Found {len(items_found)} items with '.srp-results li.s-item'")
+        
+        for box in items_found:
+            if box.get() in best_selling_html_set:
+                continue
+            css = lambda css: box.css(css).get('') or None
+            css_float = (
+                lambda css: float(box.css(css).re_first(r'(\d+\.*\d*)', default='0.0'))
+                if box.css(css)
+                else 0.0
+            )
+            href = box.css('a::attr(href)').get()
+            if not href or not href.startswith("http"):
+                continue
+            price = css_float('.s-item__price::text')
+            if price == 0.0 or price == 20.0:
+                continue
+            shipping = css_float('.s-item__shipping::text')
+            total = price + shipping
+            title = css('.s-item__title span::text')
+            if not title:
+                continue
+            title_lower = title.lower()
 
-        if any(bad in title_lower for bad in ['art card', 'art series', 'display commander']):
-            continue
-        if any(bulk in title_lower for bulk in ['singles', 'choose your card', 'pick your card', 'select card']):
-            continue
-        if all(good not in title_lower for good in ['mtg', 'magic']):
-            continue
+            if any(bad in title_lower for bad in ['art card', 'art series', 'display commander']):
+                continue
+            if any(bulk in title_lower for bulk in ['singles', 'choose your card', 'pick your card', 'select card']):
+                continue
+            if all(good not in title_lower for good in ['mtg', 'magic']):
+                continue
 
-        item = {
-            'title': title,
-            'price': price,
-            'shipping': shipping,
-            'total': total,
-            'url': href
-        }
-        previews.append(item)
+            item = {
+                'title': title,
+                'price': price,
+                'shipping': shipping,
+                'total': total,
+                'url': href
+            }
+            previews.append(item)
+            
+        if previews:
+            return previews
+            
+    except Exception as e:
+        print(f"[eBay Parser] Strategy 1 failed: {e}")
+    
+    # Strategy 2: Try alternative selectors
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Try different item selectors
+        alternative_selectors = [
+            'li.s-item',
+            'div[data-testid="item"]',
+            '.it-ttl',
+            '.lvtitle',
+            '.itemContainer'
+        ]
+        
+        for selector in alternative_selectors:
+            items = soup.select(selector)
+            print(f"[eBay Parser] Strategy 2: Found {len(items)} items with '{selector}'")
+            
+            if items:
+                for item in items[:10]:  # Limit to first 10 items for processing
+                    try:
+                        # Try to extract title
+                        title_elem = item.select_one('h3, .it-ttl, .s-item__title, [data-testid="title"]')
+                        if not title_elem:
+                            continue
+                        title = title_elem.get_text(strip=True)
+                        
+                        # Try to extract price
+                        price_elem = item.select_one('.s-item__price, .notranslate, .u-flL, .fee, .bin')
+                        if not price_elem:
+                            continue
+                        price_text = price_elem.get_text(strip=True)
+                        
+                        # Extract numeric price
+                        import re
+                        price_match = re.search(r'AU?\$?([\d,]+\.?\d*)', price_text)
+                        if not price_match:
+                            continue
+                        price = float(price_match.group(1).replace(',', ''))
+                        
+                        if price == 0.0 or price == 20.0:
+                            continue
+                        
+                        # Try to extract URL
+                        link_elem = item.find('a', href=True) or item.select_one('[data-testid="link"]')
+                        if not link_elem:
+                            continue
+                        href = link_elem.get('href', '')
+                        
+                        if not href.startswith('http'):
+                            href = 'https://www.ebay.com.au' + href
+                        
+                        title_lower = title.lower()
+                        
+                        # Apply filters
+                        if any(bad in title_lower for bad in ['art card', 'art series', 'display commander']):
+                            continue
+                        if any(bulk in title_lower for bulk in ['singles', 'choose your card', 'pick your card', 'select card']):
+                            continue
+                        if all(good not in title_lower for good in ['mtg', 'magic']):
+                            continue
+                        
+                        preview_item = {
+                            'title': title,
+                            'price': price,
+                            'shipping': 0.0,  # Default shipping
+                            'total': price,
+                            'url': href
+                        }
+                        previews.append(preview_item)
+                        
+                    except Exception as item_e:
+                        print(f"[eBay Parser] Error parsing item: {item_e}")
+                        continue
+                
+                if previews:
+                    print(f"[eBay Parser] Strategy 2 successful: Found {len(previews)} valid items")
+                    return previews
+                    
+    except Exception as e:
+        print(f"[eBay Parser] Strategy 2 failed: {e}")
+    
+    print("[eBay Parser] All parsing strategies failed")
     return previews
 
 
@@ -455,12 +553,60 @@ def scrape_ebay(cardname):
         response = enhanced_session.get(url)
         enhanced_session.close()
         
-        if 'captcha' in response.text.lower() or 'blocked' in response.text.lower():
-            print("[eBay] Enhanced session got blocked, trying original session...")
-            time.sleep(random.uniform(2, 5))
-            response = session.get(url)
-        else:
-            print(f"[eBay] Enhanced session success, response length: {len(response.text)}")
+        # Check for challenge page indicators
+        challenge_indicators = [
+            'checking your browser',
+            'pardon our interruption',
+            'challenge',
+            'captcha',
+            'blocked'
+        ]
+        
+        response_lower = response.text.lower()
+        is_challenge_page = any(indicator in response_lower for indicator in challenge_indicators)
+        
+        if is_challenge_page:
+            print("[eBay] Challenge page detected, trying alternative approach...")
+            # Try to extract the actual destination URL from the challenge page
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Look for the form with the destination URL
+            form = soup.find('form', {'id': 'destForm'})
+            if form and form.get('action'):
+                dest_url = form.get('action')
+                print(f"[eBay] Found redirect URL: {dest_url}")
+                
+                # Wait a bit and try the actual destination
+                time.sleep(random.uniform(3, 6))
+                
+                try:
+                    # Create a new session for the destination request
+                    dest_session = httpx.Client(
+                        headers=enhanced_headers,
+                        http2=True, 
+                        follow_redirects=True, 
+                        timeout=30.0
+                    )
+                    dest_response = dest_session.get(dest_url)
+                    dest_session.close()
+                    
+                    if not any(indicator in dest_response.text.lower() for indicator in challenge_indicators):
+                        print(f"[eBay] Successfully accessed destination page, length: {len(dest_response.text)}")
+                        results = parse_ebay_search(dest_response)
+                        print(f"[eBay] Parsed {len(results)} results from destination")
+                        
+                        if results:
+                            best = min(results, key=lambda x: x['total'])
+                            return (best['total'], best['title'], best['url'])
+                except Exception as dest_e:
+                    print(f"[eBay] Error fetching destination: {dest_e}")
+            
+            # If all else fails, try a simplified search approach
+            print("[eBay] Trying simplified search...")
+            return scrape_ebay_simple(cardname)
+        
+        print(f"[eBay] Enhanced session success, response length: {len(response.text)}")
         
         results = parse_ebay_search(response)
         print(f"[eBay] Parsed {len(results)} results")
@@ -472,6 +618,168 @@ def scrape_ebay(cardname):
         
     except Exception as e:
         print(f"[eBay ERROR] {e}")
+        return (0.0, 'Error', '')
+
+
+def scrape_ebay_simple(cardname):
+    """Simplified eBay scraper as final fallback"""
+    print(f"[eBay Simple] eBay has implemented strong bot protection")
+    print(f"[eBay Simple] Temporarily returning 'temporarily unavailable' for {cardname}")
+    print(f"[eBay Simple] eBay scraping requires more advanced techniques (e.g., residential proxies, CAPTCHA solving)")
+    
+    # For now, return a special status indicating the service is temporarily unavailable
+    # This is more honest than returning "Not found" when we actually can't access the site
+    return (0.0, 'Temporarily unavailable (eBay bot protection)', '')
+
+
+def scrape_ebay_playwright(cardname):
+    """Fallback eBay scraper using Playwright for challenge pages"""
+    import random
+    import time
+    from playwright.sync_api import sync_playwright
+    
+    url = 'https://www.ebay.com.au/sch/i.html?' + urlencode({
+        '_nkw': cardname,
+        '_sacat': 0,
+        '_ipg': 60,
+        '_sop': SORTING_MAP['best_match'],
+        '_pgn': 1,
+        'LH_BIN': 1,
+    })
+    
+    print(f"[eBay Playwright] Fetching: {url}")
+    
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-web-security',
+                    '--disable-features=VizDisplayCompositor',
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-extensions',
+                    '--no-first-run',
+                    '--disable-default-apps'
+                ]
+            )
+            
+            context = browser.new_context(
+                viewport={"width": random.randint(1200, 1920), "height": random.randint(800, 1080)},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                locale="en-AU",
+                timezone_id="Australia/Sydney",
+                extra_http_headers={
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                    'Accept-Language': 'en-AU,en;q=0.9,en-US;q=0.8',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Cache-Control': 'max-age=0',
+                    'DNT': '1',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1'
+                }
+            )
+            
+            page = context.new_page()
+            
+            # Add stealth scripts
+            page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined,
+                });
+                
+                delete window.chrome;
+                
+                Object.defineProperty(navigator, 'permissions', {
+                    get: () => ({
+                        query: () => Promise.resolve({ state: 'granted' })
+                    })
+                });
+                
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5]
+                });
+                
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-AU', 'en', 'en-US']
+                });
+                
+                window.navigator.chrome = {
+                    runtime: {}
+                };
+            """)
+            
+            time.sleep(random.uniform(1, 3))
+            
+            # Navigate to the page with more realistic behavior
+            print("[eBay Playwright] Navigating to search page...")
+            page.goto(url, timeout=45000, wait_until='networkidle')
+            
+            # Add some realistic mouse movements and scrolling
+            page.evaluate("""
+                // Simulate some realistic user behavior
+                window.scrollTo(0, 100);
+                setTimeout(() => window.scrollTo(0, 300), 1000);
+                setTimeout(() => window.scrollTo(0, 0), 2000);
+            """)
+            
+            # Wait for potential challenge page to resolve
+            initial_wait = random.randint(8000, 12000)
+            print(f"[eBay Playwright] Initial wait: {initial_wait}ms")
+            page.wait_for_timeout(initial_wait)
+            
+            # Check if we're still on a challenge page
+            page_content = page.content()
+            challenge_keywords = ['checking your browser', 'pardon our interruption', 'challenge', 'reference id']
+            
+            if any(keyword in page_content.lower() for keyword in challenge_keywords):
+                print("[eBay Playwright] Challenge page detected, attempting bypass...")
+                
+                # Try clicking or interacting if there are interactive elements
+                try:
+                    # Look for any buttons or interactive elements that might help
+                    button_selectors = ['button', '[role="button"]', 'input[type="submit"]']
+                    for selector in button_selectors:
+                        elements = page.query_selector_all(selector)
+                        if elements:
+                            print(f"[eBay Playwright] Found {len(elements)} {selector} elements")
+                            break
+                except:
+                    pass
+                
+                # Wait longer for automatic redirection
+                extended_wait = random.randint(15000, 25000)
+                print(f"[eBay Playwright] Extended wait: {extended_wait}ms")
+                page.wait_for_timeout(extended_wait)
+                page_content = page.content()
+                
+                # Final check
+                if any(keyword in page_content.lower() for keyword in challenge_keywords):
+                    print("[eBay Playwright] Still on challenge page after extended wait")
+                else:
+                    print("[eBay Playwright] Challenge page resolved!")
+            
+            browser.close()
+            
+            # Create a mock response object for parse_ebay_search
+            class MockResponse:
+                def __init__(self, text):
+                    self.text = text
+            
+            mock_response = MockResponse(page_content)
+            results = parse_ebay_search(mock_response)
+            print(f"[eBay Playwright] Parsed {len(results)} results")
+            
+            if not results:
+                return (0.0, 'Not found', '')
+            
+            best = min(results, key=lambda x: x['total'])
+            return (best['total'], best['title'], best['url'])
+            
+    except Exception as e:
+        print(f"[eBay Playwright ERROR] {e}")
         return (0.0, 'Error', '')
 
 

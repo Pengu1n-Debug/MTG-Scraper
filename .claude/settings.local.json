@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(del debug_ebay.py test_ebay_fix.py ebay_response.html)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
