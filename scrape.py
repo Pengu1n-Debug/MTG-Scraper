@@ -31,7 +31,7 @@ session = httpx.Client(headers={
     'Accept-Encoding': 'gzip, deflate, br'
 }, http2=True, follow_redirects=True, timeout=30.0)
 
-def scrape_moonmtg(card_name):
+def scrape_moonmtg(card_name, set_code=None, collector_number=None):
     BASE_URL = 'https://moonmtg.com/products/'
     import re
     import requests
@@ -100,11 +100,12 @@ def scrape_moonmtg(card_name):
     title, price, variant_id = sorted(in_stock_variants, key=lambda x: x[1])[0]
     return (price, title, f'{BASE_URL}{handle}?variant={variant_id}')
 
-def fetch_mtgmate_price(card_name: str):
+def fetch_mtgmate_price(card_name: str, set_code: str = None, collector_number: str = None):
     """
     Scrape MTGMate search results for a given card.
     Returns (cheapest_price, title, url) like other scrapers.
     """
+    # MTGMate doesn't support set-based search, use card name only
     url = f"https://www.mtgmate.com.au/cards/search?q={card_name.replace(' ', '+')}"
     scraper = cloudscraper.create_scraper()
 
@@ -134,6 +135,7 @@ def fetch_mtgmate_price(card_name: str):
 
     uuid_map = data.get("uuid", {})
     results = []
+    set_matched_results = []
 
     for card in data.get("cards", []):
         card_id = card.get("uuid")
@@ -148,20 +150,30 @@ def fetch_mtgmate_price(card_name: str):
 
         qty = details.get("quantity", 0)
         if price > 0 and qty > 0:
-            results.append((
+            card_set = details.get('set_name', '').lower()
+            result = (
                 price,
                 f"{details.get('name')} ({details.get('set_name')}, {details.get('finish')})",
                 f"https://www.mtgmate.com.au{details.get('link_path', '')}"
-            ))
+            )
 
-    if not results:
+            # If we have a set code and it matches, prioritize this result
+            if set_code and set_code.lower() in card_set:
+                set_matched_results.append(result)
+            else:
+                results.append(result)
+
+    # Prefer set-matched results if available
+    all_results = set_matched_results + results
+
+    if not all_results:
         return (0.0, "Out of stock", "")
 
-    cheapest = min(results, key=lambda x: x[0])
+    cheapest = min(all_results, key=lambda x: x[0])
     print(f"[MTGMate] Cheapest: {cheapest}")
     return cheapest
 
-def scrape_gg(card_name, base_url):
+def scrape_gg(card_name, base_url, set_code=None, collector_number=None):
     def normalize(text):
         text = text.lower()
         text = re.sub(r"[’'\":,?!()\[\]]", "", text)
@@ -171,7 +183,12 @@ def scrape_gg(card_name, base_url):
 
     target = normalize(card_name)
     target_first = target.split()[0] if target else ""
-    query = quote_plus(f"{card_name} product_type:\"mtg\"")
+
+    # Build search query with set code if available
+    search_query = card_name
+    if set_code:
+        search_query += f" {set_code}"
+    query = quote_plus(f"{search_query} product_type:\"mtg\"")
     url = f"{base_url}/search?q={query}"
     headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -228,7 +245,7 @@ import re
 import requests
 from bs4 import BeautifulSoup
 
-def scrape_cardhub(card_name):
+def scrape_cardhub(card_name, set_code=None, collector_number=None):
     def normalize(text):
         text = text.lower()
         text = re.sub(r"[^a-z0-9\s-]", "", text)
@@ -237,7 +254,12 @@ def scrape_cardhub(card_name):
 
     target = normalize(card_name)
 
-    url = f"https://thecardhubaustralia.com.au/search?type=product&options%5Bprefix%5D=last&q={card_name.replace(' ', '+')}"
+    # Build search query with set code if available
+    search_query = card_name
+    if set_code:
+        search_query += f" {set_code}"
+
+    url = f"https://thecardhubaustralia.com.au/search?type=product&options%5Bprefix%5D=last&q={search_query.replace(' ', '+')}"
     headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
@@ -311,18 +333,18 @@ def scrape_cardhub(card_name):
         print(f"[CardHub] {e}")
         return 0.0, "Error", ""
 
-def scrape_ggadelaide(card_name: str):
-    return scrape_gg(card_name, base_url="https://ggadelaide.com.au")
+def scrape_ggadelaide(card_name: str, set_code=None, collector_number=None):
+    return scrape_gg(card_name, base_url="https://ggadelaide.com.au", set_code=set_code, collector_number=collector_number)
 
 
-def scrape_ggmodbury(card_name: str):
-    return scrape_gg(card_name, base_url="https://ggmodbury.com.au")
+def scrape_ggmodbury(card_name: str, set_code=None, collector_number=None):
+    return scrape_gg(card_name, base_url="https://ggmodbury.com.au", set_code=set_code, collector_number=collector_number)
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-def scrape_ggaustralia(card_name: str):
+def scrape_ggaustralia(card_name: str, set_code=None, collector_number=None):
     def normalize(name: str) -> str:
         name = re.split(r'[\(\[]', name)[0]
         name = name.lower()
@@ -333,8 +355,13 @@ def scrape_ggaustralia(card_name: str):
 
     target_normalized = normalize(card_name)
 
+    # Build search query with set code if available
+    search_query = card_name
+    if set_code:
+        search_query += f" {set_code}"
+
     url = (
-        f"https://tcg.goodgames.com.au/search?q={card_name.replace(' ', '+')}"
+        f"https://tcg.goodgames.com.au/search?q={search_query.replace(' ', '+')}"
         f"&s=-isActive,new_discounted_price,-_rank&f_Availability=Exclude+Out+Of+Stock"
     )
 
@@ -424,11 +451,16 @@ def scrape_ggaustralia(card_name: str):
         print(f"[GGAustralia scrape error]: {e}")
         return 0.0, "Error", ""
     
-def scrape_jenes(card_name: str):
+def scrape_jenes(card_name: str, set_code=None, collector_number=None):
     import requests, re
     from bs4 import BeautifulSoup
 
-    url = f"https://jenesmtg.com.au/search?q={card_name}&options%5Bprefix%5D=last"
+    # Build search query with set code if available
+    search_query = card_name
+    if set_code:
+        search_query += f" {set_code}"
+
+    url = f"https://jenesmtg.com.au/search?q={search_query}&options%5Bprefix%5D=last"
     headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
@@ -492,36 +524,47 @@ def parse_decklist_from_input(text):
             # Check if first part is quantity (number with optional 'x')
             if re.match(r'\d+x?', parts[0], re.IGNORECASE):
                 # New format: "1 Arcane Signet (fic) 334"
-                # Extract card name (everything between quantity and parentheses or until end)
                 remaining_parts = parts[1:]
                 card_name_parts = []
+                set_code = None
+                collector_number = None
 
-                for part in remaining_parts:
-                    # Stop when we hit something that looks like a set code in parentheses
+                for i, part in enumerate(remaining_parts):
+                    # Check for set code in parentheses
                     if part.startswith('(') and part.endswith(')'):
+                        set_code = part[1:-1]  # Remove parentheses
+                        # Check if next part is collector number
+                        if i + 1 < len(remaining_parts) and remaining_parts[i + 1].isdigit():
+                            collector_number = remaining_parts[i + 1]
                         break
-                    # Stop when we hit what looks like a collector number (pure digits)
-                    if part.isdigit():
+                    # Check for standalone collector number
+                    elif part.isdigit() and not card_name_parts:
+                        # If we hit a number with no card name yet, skip
+                        continue
+                    elif part.isdigit():
+                        # This is likely a collector number
+                        collector_number = part
                         break
-                    card_name_parts.append(part)
+                    else:
+                        card_name_parts.append(part)
 
                 if card_name_parts:
                     card_name = ' '.join(card_name_parts)
-                    cards.append(card_name)
+                    cards.append((card_name, set_code, collector_number))
             else:
                 # Fallback to old format parsing
                 match = re.match(r'(\d+x?\s*)?(.*)', line, re.IGNORECASE)
                 if match:
                     card_name = match.group(2).strip()
                     if card_name:
-                        cards.append(card_name)
+                        cards.append((card_name, None, None))
         else:
             # Single word or old format fallback
             match = re.match(r'(\d+x?\s*)?(.*)', line, re.IGNORECASE)
             if match:
                 card_name = match.group(2).strip()
                 if card_name:
-                    cards.append(card_name)
+                    cards.append((card_name, None, None))
 
     return cards
 
@@ -889,10 +932,10 @@ class MTGScraperGUI:
                 self.text_input.delete('1.0', tk.END)
                 self.text_input.insert(tk.END, f.read())
 
-    def fetch_card_prices_parallel(self, card):
+    def fetch_card_prices_parallel(self, card, set_code=None, collector_number=None):
         enabled_sources = {name: cfg['func'] for name, cfg in SCRAPER_CONFIG.items() if self.source_vars[name].get()}
         with ThreadPoolExecutor(max_workers=len(enabled_sources)) as executor:
-            futures = {name: executor.submit(func, card) for name, func in enabled_sources.items() if name != "eBay"}
+            futures = {name: executor.submit(func, card, set_code, collector_number) for name, func in enabled_sources.items()}
         results = {}
         for name, future in futures.items():
             try:
@@ -904,9 +947,6 @@ class MTGScraperGUI:
             except Exception as e:
                 print(f"[{name} scrape error]: {e}")
                 results[name] = (0.0, "Error", "")
-        if "eBay" in enabled_sources:
-            time.sleep(0.75)
-            results["eBay"] = SCRAPER_CONFIG["eBay"]["func"](card)
         all_sources = SCRAPER_CONFIG.keys()
         prices = []
         urls = []
@@ -975,11 +1015,13 @@ class MTGScraperGUI:
         input_text = self.text_input.get('1.0', tk.END)
         cards = parse_decklist_from_input(input_text)
         total = 0.0
-        for i, card in enumerate(cards, start=1):
+        for i, card_info in enumerate(cards, start=1):
             if self.stop_flag:
                 self.progress_label.config(text='Stopped.')
                 break
-            card, display_data, cheapest, url, results = self.fetch_card_prices_parallel(card)
+            # Unpack card info tuple (name, set_code, collector_number)
+            card_name, set_code, collector_number = card_info
+            card, display_data, cheapest, url, results = self.fetch_card_prices_parallel(card_name, set_code, collector_number)
             row = [card]
             for source in SCRAPER_CONFIG:
                 row.append(display_data.get(source, "--"))
