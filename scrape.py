@@ -484,11 +484,45 @@ def parse_decklist_from_input(text):
         line = line.strip()
         if not line:
             continue
-        match = re.match(r'(\d+x?\s*)?(.*)', line, re.IGNORECASE)
-        if match:
-            card_name = match.group(2).strip()
-            if card_name:
-                cards.append(card_name)
+
+        # Split line by spaces to get sections
+        parts = line.split()
+
+        if len(parts) >= 2:
+            # Check if first part is quantity (number with optional 'x')
+            if re.match(r'\d+x?', parts[0], re.IGNORECASE):
+                # New format: "1 Arcane Signet (fic) 334"
+                # Extract card name (everything between quantity and parentheses or until end)
+                remaining_parts = parts[1:]
+                card_name_parts = []
+
+                for part in remaining_parts:
+                    # Stop when we hit something that looks like a set code in parentheses
+                    if part.startswith('(') and part.endswith(')'):
+                        break
+                    # Stop when we hit what looks like a collector number (pure digits)
+                    if part.isdigit():
+                        break
+                    card_name_parts.append(part)
+
+                if card_name_parts:
+                    card_name = ' '.join(card_name_parts)
+                    cards.append(card_name)
+            else:
+                # Fallback to old format parsing
+                match = re.match(r'(\d+x?\s*)?(.*)', line, re.IGNORECASE)
+                if match:
+                    card_name = match.group(2).strip()
+                    if card_name:
+                        cards.append(card_name)
+        else:
+            # Single word or old format fallback
+            match = re.match(r'(\d+x?\s*)?(.*)', line, re.IGNORECASE)
+            if match:
+                card_name = match.group(2).strip()
+                if card_name:
+                    cards.append(card_name)
+
     return cards
 
 CACHE_FILE = os.path.join(os.path.dirname(__file__), "deck_cache.json")
