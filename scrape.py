@@ -650,7 +650,7 @@ class MTGScraperGUI:
         self.load_button = tk.Button(control_frame, text='Load File', command=self.load_file)
         self.load_button.pack(side="left", padx=5, pady=2)
 
-        self.save_button = tk.Button(control_frame, text='Save to Excel', command=self.save_to_excel)
+        self.save_button = tk.Button(control_frame, text='Save to CSV', command=self.save_to_excel)
         self.save_button.pack(side="left", padx=5, pady=2)
 
         frame = tk.Frame(root)
@@ -980,34 +980,56 @@ class MTGScraperGUI:
         if not self.card_urls:
             messagebox.showinfo("No Data", "You must search prices before saving.")
             return
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "MTG Card Prices"
-        ws.append(["Card", "Price (AU$)", "Source", "URL"])
+
+        # Get deck name for filename
+        deck_name = self.deck_var.get()
+        if not deck_name or deck_name == "Select saved deck":
+            deck_name = "MTG_Prices"
+        else:
+            # Clean deck name for filename
+            deck_name = re.sub(r'[<>:"/\\|?*]', '_', deck_name)
+
+        # Create CSV content
+        import csv
+        import io
+
+        # Build header with all store columns
+        header = ["Card"] + list(SCRAPER_CONFIG.keys()) + ["Cheapest Price", "Cheapest URL"]
+
+        csv_data = []
+        csv_data.append(header)
+
         for row_id in self.tree.get_children():
             row = self.tree.item(row_id)['values']
             card = row[0]
+            card_data = [card]
+
+            # Add all store prices
+            prices = self.card_urls.get(card, {}).get('Prices', {})
+            urls = self.card_urls.get(card, {}).get('URLs', {})
+
+            for source in SCRAPER_CONFIG.keys():
+                price_str = prices.get(source, "--")
+                card_data.append(price_str)
+
+            # Add cheapest price and URL
             cheapest_price = row[len(SCRAPER_CONFIG) + 1]
-            urls = self.card_urls.get(card, {})
-            url = urls.get("Cheapest", "")
-            source = ""
-            if url:
-                for name in SCRAPER_CONFIG:
-                    if any(substring in url for substring in [
-                        "ebay", "moonmtg", "mtgmate", "cardhub", "ggadelaide", "ggmodbury", "goodgames.com.au"
-                    ]):
-                        if name.lower().replace(" ", "") in url.replace("www.", "").lower():
-                            source = name
-                            break
-            ws.append([card, cheapest_price, source, url])
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"MTG_Price_Report_{timestamp}.xlsx"
+            cheapest_url = self.card_urls.get(card, {}).get("Cheapest", "")
+            card_data.extend([cheapest_price, cheapest_url])
+
+            csv_data.append(card_data)
+
+        # Save as CSV
+        filename = f"{deck_name}_Prices.csv"
         filepath = os.path.join(os.path.expanduser("~/Downloads"), filename)
+
         try:
-            wb.save(filepath)
-            messagebox.showinfo("Success", f"Excel file saved to:\n{filepath}")
+            with open(filepath, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerows(csv_data)
+            messagebox.showinfo("Success", f"CSV file saved to:\n{filepath}")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to save Excel file:\n{e}")
+            messagebox.showerror("Error", f"Failed to save CSV file:\n{e}")
 
     def on_click(self, event):
         selected = self.tree.selection()
