@@ -3,9 +3,11 @@ import threading
 import time
 import webbrowser
 import os
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = r"C:\Users\kaden\PlaywrightBrowsers"
 import datetime
 import sys
 from urllib.parse import urlencode, quote, quote_plus
+import cloudscraper
 from bs4 import BeautifulSoup
 from parsel import Selector
 import tkinter as tk
@@ -18,6 +20,8 @@ from selenium.webdriver.chrome.options import Options
 from concurrent.futures import ThreadPoolExecutor
 from openpyxl import Workbook
 from playwright.sync_api import sync_playwright
+from tkinterdnd2 import TkinterDnD, DND_FILES
+import mtg_parser
 
 SORTING_MAP = {'best_match': 12}
 session = httpx.Client(headers={
@@ -26,18 +30,6 @@ session = httpx.Client(headers={
     'Accept-Language': 'en-US,en;q=0.9',
     'Accept-Encoding': 'gzip, deflate, br'
 }, http2=True, follow_redirects=True, timeout=30.0)
-
-EBAY_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/123.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.ebay.com.au/",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "DNT": "1",
-}
 
 def scrape_moonmtg(card_name):
     BASE_URL = 'https://moonmtg.com/products/'
@@ -108,135 +100,66 @@ def scrape_moonmtg(card_name):
     title, price, variant_id = sorted(in_stock_variants, key=lambda x: x[1])[0]
     return (price, title, f'{BASE_URL}{handle}?variant={variant_id}')
 
-def fetch_mtgmate_price(card_name):
-    from playwright.sync_api import sync_playwright
-    from urllib.parse import quote
-    import re
-    from bs4 import BeautifulSoup
-    import random
-    import time
-
-    url = f"https://www.mtgmate.com.au/cards/{quote(card_name)}"
-    print(f"\n[MTGMate] Fetching: {url}")
+def fetch_mtgmate_price(card_name: str):
+    """
+    Scrape MTGMate search results for a given card.
+    Returns (cheapest_price, title, url) like other scrapers.
+    """
+    url = f"https://www.mtgmate.com.au/cards/search?q={card_name.replace(' ', '+')}"
+    scraper = cloudscraper.create_scraper()
 
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-web-security',
-                    '--disable-features=VizDisplayCompositor',
-                    '--no-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--disable-extensions',
-                    '--no-first-run',
-                    '--disable-default-apps',
-                    '--disable-background-networking',
-                    '--disable-background-timer-throttling',
-                    '--disable-renderer-backgrounding'
-                ]
-            )
-            
-            context = browser.new_context(
-                viewport={"width": random.randint(1200, 1920), "height": random.randint(800, 1080)},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                locale="en-AU",
-                timezone_id="Australia/Sydney",
-                extra_http_headers={
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                    'Accept-Language': 'en-AU,en;q=0.9,en-US;q=0.8',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Cache-Control': 'max-age=0',
-                    'DNT': '1',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none',
-                    'Sec-Fetch-User': '?1',
-                    'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-                    'sec-ch-ua-mobile': '?0',
-                    'sec-ch-ua-platform': '"Windows"'
-                }
-            )
-            
-            page = context.new_page()
-            
-            page.add_init_script("""
-                // Remove webdriver property
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined,
-                });
-                
-                // Remove chrome automation indicators
-                delete window.chrome;
-                
-                // Mock permissions API
-                Object.defineProperty(navigator, 'permissions', {
-                    get: () => ({
-                        query: () => Promise.resolve({ state: 'granted' })
-                    })
-                });
-                
-                // Add realistic plugins
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5]
-                });
-                
-                // Mock languages
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-AU', 'en', 'en-US']
-                });
-                
-                // Override automation detection
-                window.navigator.chrome = {
-                    runtime: {}
-                };
-                
-                // Remove automation flags
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => false,
-                });
-            """)
-            
-            time.sleep(random.uniform(1.5, 3.5))
-            
-            page.goto(url, timeout=30000, wait_until='domcontentloaded')
-            
-            page.wait_for_timeout(random.randint(2000, 4000))
-            
-            page.evaluate("""
-                window.scrollTo(0, Math.floor(Math.random() * 200));
-                setTimeout(() => window.scrollTo(0, 0), 500);
-            """)
-            
-            page.wait_for_timeout(random.randint(1000, 2000))
-            
-            html = page.content()
-            browser.close()
-
-        soup = BeautifulSoup(html, "html.parser")
-
-        page_text = soup.get_text()
-
-        matches = re.findall(r"\$\d+(?:\.\d{2})?", page_text)
-        print(f"[MTGMate] Found price strings: {matches}")
-
-        prices = [float(p.strip('$').replace(',', '')) for p in matches]
-
-        if not prices:
-            print("[MTGMate] No price matches found.")
-            return (0.0, 'Not found', '')
-
-        cheapest = min(prices)
-        print(f"[MTGMate] Cheapest price: ${cheapest:.2f}")
-        return (cheapest, f"{card_name} (MTGMate)", url)
-
+        r = scraper.get(url, timeout=20)
+        r.raise_for_status()
     except Exception as e:
-        print(f"[MTGMate ERROR] {e}")
-        return (0.0, 'Error', '')
+        print(f"[MTGMate] Request failed: {e}")
+        return (0.0, "Error", "")
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    container = soup.find("div", {"data-react-class": "FilterableTable"})
+    if not container:
+        print("[MTGMate] Could not find FilterableTable div.")
+        return (0.0, "Not found", "")
+
+    raw_props = container.get("data-react-props")
+    if not raw_props:
+        print("[MTGMate] No data-react-props found.")
+        return (0.0, "Not found", "")
+
+    try:
+        data = json.loads(raw_props)
+    except Exception as e:
+        print(f"[MTGMate] JSON parsing error: {e}")
+        return (0.0, "Error", "")
+
+    uuid_map = data.get("uuid", {})
+    results = []
+
+    for card in data.get("cards", []):
+        card_id = card.get("uuid")
+        details = uuid_map.get(card_id, {})
+        if not details:
+            continue
+
+        try:
+            price = int(details.get("price", 0)) / 100
+        except (TypeError, ValueError):
+            price = 0.0
+
+        qty = details.get("quantity", 0)
+        if price > 0 and qty > 0:
+            results.append((
+                price,
+                f"{details.get('name')} ({details.get('set_name')}, {details.get('finish')})",
+                f"https://www.mtgmate.com.au{details.get('link_path', '')}"
+            ))
+
+    if not results:
+        return (0.0, "Out of stock", "")
+
+    cheapest = min(results, key=lambda x: x[0])
+    print(f"[MTGMate] Cheapest: {cheapest}")
+    return cheapest
 
 def scrape_gg(card_name, base_url):
     def normalize(text):
@@ -301,6 +224,10 @@ def clean_name(title: str) -> str:
     base = re.split(r'[\(\[]', title, 1)[0]
     return base.strip().lower()
 
+import re
+import requests
+from bs4 import BeautifulSoup
+
 def scrape_cardhub(card_name):
     def normalize(text):
         text = text.lower()
@@ -309,7 +236,6 @@ def scrape_cardhub(card_name):
         return text.strip()
 
     target = normalize(card_name)
-    target_first = target.split()[0] if target else ""
 
     url = f"https://thecardhubaustralia.com.au/search?type=product&options%5Bprefix%5D=last&q={card_name.replace(' ', '+')}"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -337,17 +263,39 @@ def scrape_cardhub(card_name):
             price = float(price_match.group(1).replace(",", ""))
 
             title_norm = normalize(title.split("(")[0].split("[")[0])
-            title_first = title_norm.split()[0] if title_norm else ""
 
-            print(f"[CardHub] #{idx} Title: {title} | Price: {price}")
-            if title_first != target_first:
-                print(f"[CardHub] Skipping: '{title_first}' != '{target_first}'")
+            if title_norm != target:
+                print(f"[CardHub] Skipping #{idx}, title mismatch: '{title_norm}' != '{target}'")
                 continue
 
             link_tag = title_div.find_parent("a")
             link = link_tag["href"] if link_tag else ""
             if link and not link.startswith("http"):
                 link = "https://thecardhubaustralia.com.au" + link
+
+            try:
+                product_resp = requests.get(link, headers=headers, timeout=15)
+                product_resp.raise_for_status()
+                product_soup = BeautifulSoup(product_resp.text, "html.parser")
+
+                if product_soup.select_one(".product-info.product-soldout"):
+                    print(f"[CardHub] Skipping #{idx}, product-soldout container found: {title}")
+                    continue
+
+                add_to_cart_btn = product_soup.select_one(".product-form__item--submit button")
+                if add_to_cart_btn:
+                    btn_text = add_to_cart_btn.get_text(strip=True).lower()
+                    is_disabled = add_to_cart_btn.has_attr("disabled")
+                    if "sold out" in btn_text or is_disabled:
+                        print(f"[CardHub] Skipping #{idx}, sold out via button: {title}")
+                        continue
+                else:
+                    print(f"[CardHub Warning] Could not find add-to-cart button on {link}")
+                    continue
+
+            except Exception as e:
+                print(f"[CardHub Error] Failed stock check for {link}: {e}")
+                continue
 
             results.append((price, title, link))
 
@@ -362,118 +310,6 @@ def scrape_cardhub(card_name):
     except Exception as e:
         print(f"[CardHub] {e}")
         return 0.0, "Error", ""
-
-def parse_ebay_search(response):
-    previews = []
-    sel = Selector(response.text)
-    best_selling_boxes = sel.xpath(
-        '//*[*[h2[contains(text(),"Best selling products")]]]//li[contains(@class, "s-item")]'
-    )
-    best_selling_html_set = set([b.get() for b in best_selling_boxes])
-    for box in sel.css('.srp-results li.s-item'):
-        if box.get() in best_selling_html_set:
-            continue
-        css = lambda css: box.css(css).get('') or None
-        css_float = (
-            lambda css: float(box.css(css).re_first(r'(\d+\.*\d*)', default='0.0'))
-            if box.css(css)
-            else 0.0
-        )
-        href = box.css('a::attr(href)').get()
-        if not href or not href.startswith("http"):
-            continue
-        price = css_float('.s-item__price::text')
-        if price == 0.0 or price == 20.0:
-            continue
-        shipping = css_float('.s-item__shipping::text')
-        total = price + shipping
-        title = css('.s-item__title span::text')
-        if not title:
-            continue
-        title_lower = title.lower()
-
-        if any(bad in title_lower for bad in ['art card', 'art series', 'display commander']):
-            continue
-        if any(bulk in title_lower for bulk in ['singles', 'choose your card', 'pick your card', 'select card']):
-            continue
-        if all(good not in title_lower for good in ['mtg', 'magic']):
-            continue
-
-        item = {
-            'title': title,
-            'price': price,
-            'shipping': shipping,
-            'total': total,
-            'url': href
-        }
-        previews.append(item)
-    return previews
-
-
-def scrape_ebay(cardname):
-    import random
-    import time
-    
-    url = 'https://www.ebay.com.au/sch/i.html?' + urlencode({
-        '_nkw': cardname,
-        '_sacat': 0,
-        '_ipg': 60,
-        '_sop': SORTING_MAP['best_match'],
-        '_pgn': 1,
-        'LH_BIN': 1,
-    })
-    
-    print(f"\n[eBay] Fetching: {url}")
-    
-    enhanced_headers = {
-        'User-Agent': random.choice([
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15'
-        ]),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-AU,en;q=0.9,en-US;q=0.8',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'DNT': '1',
-        'Cache-Control': 'max-age=0',
-        'Pragma': 'no-cache'
-    }
-    
-    try:
-        time.sleep(random.uniform(1, 3))
-        
-        print("[eBay] Trying enhanced session method...")
-        enhanced_session = httpx.Client(
-            headers=enhanced_headers,
-            http2=True, 
-            follow_redirects=True, 
-            timeout=30.0
-        )
-        
-        response = enhanced_session.get(url)
-        enhanced_session.close()
-        
-        if 'captcha' in response.text.lower() or 'blocked' in response.text.lower():
-            print("[eBay] Enhanced session got blocked, trying original session...")
-            time.sleep(random.uniform(2, 5))
-            response = session.get(url)
-        else:
-            print(f"[eBay] Enhanced session success, response length: {len(response.text)}")
-        
-        results = parse_ebay_search(response)
-        print(f"[eBay] Parsed {len(results)} results")
-        
-        if not results:
-            return (0.0, 'Not found', '')
-        best = min(results, key=lambda x: x['total'])
-        return (best['total'], best['title'], best['url'])
-        
-    except Exception as e:
-        print(f"[eBay ERROR] {e}")
-        return (0.0, 'Error', '')
-
 
 def scrape_ggadelaide(card_name: str):
     return scrape_gg(card_name, base_url="https://ggadelaide.com.au")
@@ -587,6 +423,60 @@ def scrape_ggaustralia(card_name: str):
     except Exception as e:
         print(f"[GGAustralia scrape error]: {e}")
         return 0.0, "Error", ""
+    
+def scrape_jenes(card_name: str):
+    import requests, re
+    from bs4 import BeautifulSoup
+
+    url = f"https://jenesmtg.com.au/search?q={card_name}&options%5Bprefix%5D=last"
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        target = card_name.strip().lower()
+        results = []
+
+        for card in soup.select("div.card-wrapper"):
+            if card.select_one("span.badge") and "Sold out" in card.get_text():
+                continue
+
+            name_tag = card.select_one("a.full-unstyled-link")
+            if not name_tag:
+                continue
+
+            full_name = name_tag.get_text(strip=True)
+            product_name = full_name.split("|")[0].strip().lower()
+
+            if product_name != target:
+                continue
+
+            link = name_tag.get("href", "")
+            if link and not link.startswith("http"):
+                link = "https://jenesmtg.com.au" + link
+
+            found_prices = set()
+            for price_tag in card.select("span.price-item"):
+                text = price_tag.get_text(strip=True)
+                match = re.search(r"\$([0-9]+\.[0-9]{2})", text)
+                if match:
+                    found_prices.add(float(match.group(1)))
+
+            if found_prices:
+                cheapest = min(found_prices)
+                results.append((cheapest, full_name, link))
+
+        if not results:
+            return (0.0, "Out of stock", "")
+
+        cheapest = min(results, key=lambda x: x[0])
+        return cheapest
+
+    except Exception as e:
+        print(f"[Jene's scrape error]: {e}")
+        return (0.0, "Error", "")
 
 def parse_decklist_from_input(text):
     cards = []
@@ -601,99 +491,170 @@ def parse_decklist_from_input(text):
                 cards.append(card_name)
     return cards
 
+CACHE_FILE = os.path.join(os.path.dirname(__file__), "deck_cache.json")
+
+def load_deck_cache():
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_deck_cache(cache):
+    with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=2)
+
 SCRAPER_CONFIG = {
-    "eBay": {"enabled": True, "func": scrape_ebay},
     "MoonMTG": {"enabled": True, "func": scrape_moonmtg}, 
     "MTGMate": {"enabled": True, "func": fetch_mtgmate_price},
     "CardHub": {"enabled": True, "func": scrape_cardhub},
-    "GGAustralia": {"enabled": True, "func": scrape_ggaustralia},
+    "JenesMTG": {"enabled": True, "func": scrape_jenes},
+    "GGAustralia": {"enabled": True, "func": scrape_ggadelaide},
     "GGModbury": {"enabled": True, "func": scrape_ggmodbury},
-    "GGAdelaide": {"enabled": True, "func": scrape_ggadelaide},
+    "GGAdelaide": {"enabled": True, "func": scrape_ggadelaide}, 
 }
 
 SOURCE_TO_COLUMN = {
-    "eBay": "eBay",
     "MoonMTG": "Moon",
     "MTGMate": "MTGMate",
     "CardHub": "CardHub",
+    "JenesMTG": "Jenes",
     "GGAustralia": "GGTCG",
     "GGModbury": "GGModbury",
     "GGAdelaide": "GoodGames",
 }
 
+from tkinterdnd2 import TkinterDnD, DND_FILES
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import threading, webbrowser, os, datetime, time
+from concurrent.futures import ThreadPoolExecutor
+from openpyxl import Workbook
+
+from tkinterdnd2 import TkinterDnD, DND_FILES
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import threading, webbrowser, os, datetime, time
+from concurrent.futures import ThreadPoolExecutor
+from openpyxl import Workbook
+
+from tkinterdnd2 import TkinterDnD, DND_FILES
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import threading, webbrowser, os, datetime, time
+from concurrent.futures import ThreadPoolExecutor
+from openpyxl import Workbook
+
 class MTGScraperGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title(
-            "MTG Price Checker (eBay • MoonMTG • MTGMate • CardHub • GGAustralia • GGAdelaide • GGModbury)"
-        )
+        self.root.title("MTG Price Checker")
         self.card_urls = {}
         self.stop_flag = False
+        headers = {"user-agent": "my-mtg-scraper/1.0 (contact: kadenschaedel@gmail.com)"}
+        self.http_client = httpx.Client(headers=headers)
+
+        toolbar = tk.Frame(root, bd=1, relief="raised")
+        toolbar.pack(side="top", fill="x")
+
+        self.quick_menu_button = tk.Menubutton(toolbar, text="Open Sources", relief="raised")
+        self.quick_menu = tk.Menu(self.quick_menu_button, tearoff=0)
+        for source in SCRAPER_CONFIG:
+            self.quick_menu.add_command(
+                label=f"From {source}",
+                command=lambda s=source: self.open_cheapest_from_source(s)
+            )
+        self.quick_menu.add_command(label="All from All Sources", command=self.open_all_cheapest_by_source)
+        self.quick_menu_button.config(menu=self.quick_menu)
+        self.quick_menu_button.pack(side="left", padx=5, pady=2)
+
+        self.toggles_button = tk.Menubutton(toolbar, text="Toggles", relief="raised")
+        self.toggles_menu = tk.Menu(self.toggles_button, tearoff=0)
+        self.source_vars = {}
+        for source in SCRAPER_CONFIG:
+            var = tk.BooleanVar(value=SCRAPER_CONFIG[source]['enabled'])
+            self.source_vars[source] = var
+            self.toggles_menu.add_checkbutton(label=source, variable=var, command=self.recalculate_cheapest_prices)
+
+        self.include_sideboard = tk.BooleanVar(value=False)
+        self.include_maybeboard = tk.BooleanVar(value=False)
+        self.toggles_menu.add_separator()
+        self.toggles_menu.add_checkbutton(label="Include Sideboard", variable=self.include_sideboard)
+        self.toggles_menu.add_checkbutton(label="Include Maybeboard", variable=self.include_maybeboard)
+
+        self.toggles_button.config(menu=self.toggles_menu)
+        self.toggles_button.pack(side="left", padx=5, pady=2)
 
         input_frame = tk.Frame(root)
         input_frame.pack(fill='x', padx=5, pady=5)
 
         missing_frame = tk.Frame(input_frame)
         missing_frame.pack(side='left', padx=5, pady=5, anchor='n')
-
         tk.Label(missing_frame, text="Missing Cards").pack(anchor='nw')
         self.missing_listbox = tk.Listbox(missing_frame, height=12, width=25)
         self.missing_listbox.pack(side='left', fill='y')
-
         missing_scroll = ttk.Scrollbar(missing_frame, orient='vertical', command=self.missing_listbox.yview)
         missing_scroll.pack(side='right', fill='y')
         self.missing_listbox.config(yscrollcommand=missing_scroll.set)
 
-        text_frame = tk.Frame(input_frame)
-        text_frame.pack(side='left', fill='both', expand=True)
+        deck_frame = tk.LabelFrame(input_frame, text="Deck Input")
+        deck_frame.pack(side='left', fill='both', expand=True, padx=5, pady=5)
+        
+        url_frame = tk.Frame(deck_frame)
+        url_frame.pack(fill='x', padx=2, pady=2)
 
-        tk.Label(text_frame, text='Enter Deck List (or load from file)').pack(anchor='w')
-        self.text_input = tk.Text(text_frame, height=10, width=60, wrap='word')
+        self.url_entry = tk.Entry(url_frame, fg="grey", width=35)
+        self.url_entry.insert(0, "Paste a deck link")
+        self.url_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.url_entry.bind("<FocusIn>", self.clear_placeholder)
+        self.url_entry.bind("<FocusOut>", self.add_placeholder)
+
+        self.fetch_button = tk.Button(url_frame, text="Fetch", command=self.fetch_deck_from_url)
+        self.fetch_button.pack(side="left", padx=2)
+
+        self.save_deck_button = tk.Button(url_frame, text="Save", command=self.save_deck)
+        self.save_deck_button.pack(side="left", padx=2)
+
+        self.deck_var = tk.StringVar()
+        self.deck_dropdown = ttk.Combobox(url_frame, textvariable=self.deck_var, state="readonly", width=25)
+        self.deck_dropdown.pack(side="left", padx=2)
+        self.deck_dropdown.bind("<<ComboboxSelected>>", self.load_saved_deck)
+
+        self.deck_dropdown.set("Select saved deck")
+        self.deck_dropdown.configure(foreground="grey")
+        self.deck_dropdown.bind("<FocusIn>", self.clear_dropdown_placeholder)
+        self.deck_dropdown.bind("<FocusOut>", self.add_dropdown_placeholder)
+
+        self.delete_deck_button = tk.Button(url_frame, text="Delete", command=self.delete_deck)
+        self.delete_deck_button.pack(side="left", padx=2)
+
+        self.deck_cache = load_deck_cache()
+        self.refresh_deck_dropdown()
+
+        self.text_input = tk.Text(deck_frame, height=15, width=60, wrap='word', relief="sunken", borderwidth=2)
         self.text_input.pack(pady=2, padx=2, fill='both', expand=True)
 
-        dropdown_frame = tk.LabelFrame(input_frame, text="Open Cheapest Options")
-        dropdown_frame.pack(side='right', fill='y', padx=5)
+        self.text_input.drop_target_register(DND_FILES)
+        self.text_input.dnd_bind("<<Drop>>", self.handle_file_drop)
 
-        self.open_all_button = tk.Button(dropdown_frame, text='Open All Cheapest', command=self.open_all_cheapest)
-        self.open_all_button.pack(padx=4, pady=2, fill='x')
+        control_frame = tk.Frame(root)
+        control_frame.pack(fill="x", padx=5, pady=5)
 
-        for source in SCRAPER_CONFIG:
-            btn = tk.Button(dropdown_frame, text=f"From {source}",
-                            command=lambda s=source: self.open_cheapest_from_source(s))
-            btn.pack(padx=4, pady=1, fill='x')
+        self.button = tk.Button(control_frame, text='Search Prices', command=self.toggle_search)
+        self.button.pack(side="left", padx=5, pady=2)
 
-        self.open_all_sources_button = tk.Button(dropdown_frame, text='All from All Sources',
-                                                 command=self.open_all_cheapest_by_source)
-        self.open_all_sources_button.pack(padx=4, pady=4, fill='x')
+        self.load_button = tk.Button(control_frame, text='Load File', command=self.load_file)
+        self.load_button.pack(side="left", padx=5, pady=2)
 
-
-        button_frame = tk.Frame(root)
-        button_frame.pack(pady=5)
-        self.button = tk.Button(button_frame, text='Search Prices', command=self.toggle_search)
-        self.button.pack(side=tk.LEFT, padx=5)
-        self.load_button = tk.Button(button_frame, text='Load File', command=self.load_file)
-        self.load_button.pack(side=tk.LEFT, padx=5)
-        self.save_button = tk.Button(button_frame, text='Save to Excel', command=self.save_to_excel)
-        self.save_button.pack(side=tk.LEFT, padx=5)
+        self.save_button = tk.Button(control_frame, text='Save to Excel', command=self.save_to_excel)
+        self.save_button.pack(side="left", padx=5, pady=2)
 
         frame = tk.Frame(root)
         frame.pack(padx=5, pady=5, fill='both', expand=True)
 
-        self.source_vars = {}
-        toggle_frame = tk.Frame(root)
-        toggle_frame.pack(pady=5)
-
-        for source in SCRAPER_CONFIG:
-            var = tk.BooleanVar(value=SCRAPER_CONFIG[source]['enabled'])
-            cb = tk.Checkbutton(toggle_frame, text=source, variable=var, command=self.recalculate_cheapest_prices)
-            cb.pack(side=tk.LEFT, padx=3)
-            self.source_vars[source] = var
-
-        self.tree = ttk.Treeview(
-            frame,
-            columns=('Card',) + tuple(SCRAPER_CONFIG.keys()) + ('Cheapest',),
-            show='headings'
-        )
+        self.tree = ttk.Treeview(frame, columns=('Card',) + tuple(SCRAPER_CONFIG.keys()) + ('Cheapest',), show='headings')
         for col in self.tree['columns']:
             self.tree.heading(col, text=col)
             self.tree.column(col, width=100)
@@ -703,29 +664,125 @@ class MTGScraperGUI:
         scrollbar.pack(side='right', fill='y')
 
         self.tree.bind('<ButtonRelease-1>', self.on_click)
+
         self.progress_label = tk.Label(root, text='')
         self.progress_label.pack(pady=2)
         self.total_label = tk.Label(root, text='Total: AU $0.00', font=('Helvetica', 12, 'bold'))
         self.total_label.pack(pady=5)
 
+        bottom_frame = tk.Frame(root)
+        bottom_frame.pack(side="bottom", fill="x", padx=5, pady=5)
+        self.open_all_button = tk.Button(bottom_frame, text='Open All Cheapest', command=self.open_all_cheapest)
+        self.open_all_button.pack(side="right", padx=5, pady=2)
+
+    def clear_placeholder(self, event=None):
+        if self.url_entry.get() == "Paste a deck link":
+            self.url_entry.delete(0, tk.END)
+            self.url_entry.config(fg="black")
+
+    def add_placeholder(self, event=None):
+        if not self.url_entry.get().strip():
+            self.url_entry.delete(0, tk.END) 
+            self.url_entry.insert(0, "Paste a deck link")
+            self.url_entry.config(fg="grey")
+
+    def clear_dropdown_placeholder(self, event=None):
+        if self.deck_dropdown.get() == "Select saved deck":
+            self.deck_dropdown.set("")
+            self.deck_dropdown.configure(foreground="black")
+
+    def add_dropdown_placeholder(self, event=None):
+        if not self.deck_dropdown.get().strip():
+            self.deck_dropdown.set("Select saved deck")
+            self.deck_dropdown.configure(foreground="grey")
+
+    def fetch_moxfield_deck(url: str):
+        match = re.search(r"/decks/([a-zA-Z0-9\-_]+)", url)
+        if not match:
+            raise ValueError("Invalid Moxfield URL")
+        deck_id = match.group(1)
+
+        api_url = f"https://api.moxfield.com/v2/decks/all/{deck_id}"
+        print(f"[DEBUG] Fetching from: {api_url}")
+
+        headers = {
+            "User-Agent": "my-mtg-scraper/1.0 (contact: kadenschaedel@gmail.com)"
+        }
+        r = requests.get(api_url, headers=headers, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+
+        cards = []
+        for section in ("mainboard", "sideboard", "maybeboard"):
+            if section in data:
+                for card in data[section].values():
+                    qty = card["quantity"]
+                    name = card["card"]["name"]
+                    cards.append((qty, name))
+                    print(f"[DEBUG] Parsed {qty}x {name}")
+        return cards
+
+    def fetch_deck_from_url(self):
+        url = self.url_entry.get().strip()
+        if not url or url == "Paste deck link":
+            messagebox.showwarning("Input Error", "Please paste a deck link.")
+            return
+
+        try:
+            import httpx
+
+            if "moxfield.com" in url:
+                messagebox.showwarning("Error", "Moxfield not currently supported.")
+                return
+            else:
+                cards = list(mtg_parser.parse_deck(url))
+
+            if not cards:
+                messagebox.showerror("Error", "Could not parse decklist from the provided URL.")
+                return
+
+            filtered = []
+            for c in cards:
+                if "sideboard" in c.tags and not self.include_sideboard.get():
+                    continue
+                if "maybeboard" in c.tags and not self.include_maybeboard.get():
+                    continue
+                filtered.append(c)
+
+            deck_text = "\n".join([f"{c.quantity} {c.name}" for c in filtered])
+
+            self.text_input.delete('1.0', tk.END)
+            self.text_input.insert(tk.END, deck_text)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Error", f"Failed to fetch deck:\n{e}")
+
+
+
+    def handle_file_drop(self, event):
+        path = event.data.strip("{}") 
+        if os.path.isfile(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                self.text_input.delete('1.0', tk.END)
+                self.text_input.insert(tk.END, f.read())
+
     def recalculate_cheapest_prices(self):
         total = 0.0
         missing_cards = []
-
         for row_id in self.tree.get_children():
             values = self.tree.item(row_id)['values']
             card_name = values[0]
             new_row = [card_name]
             cheapest_price = float('inf')
             cheapest_url = ""
-
             for source in SCRAPER_CONFIG:
                 price_str = self.card_urls.get(card_name, {}).get('Prices', {}).get(source, "--")
                 try:
                     price = float(price_str)
                 except:
                     price = 0.0
-
                 if self.source_vars[source].get():
                     new_row.append(f"{price:.2f}")
                     if 0 < price < cheapest_price:
@@ -733,21 +790,15 @@ class MTGScraperGUI:
                         cheapest_url = self.card_urls.get(card_name, {}).get('URLs', {}).get(source, "")
                 else:
                     new_row.append("--")
-
             if cheapest_price == float('inf'):
                 cheapest_price = 0.0
-
             new_row.append(f"{cheapest_price:.2f}")
             self.tree.item(row_id, values=tuple(new_row))
-
             self.card_urls[card_name]['Cheapest'] = cheapest_url
             total += cheapest_price
-    
             if cheapest_price == 0.0:
                 missing_cards.append(card_name)
-
         self.total_label.config(text=f"Total: AU ${total:.2f}")
-
         self.missing_listbox.delete(0, tk.END)
         for card in sorted(set(missing_cards)):
             self.missing_listbox.insert(tk.END, card)
@@ -769,19 +820,9 @@ class MTGScraperGUI:
                 self.text_input.insert(tk.END, f.read())
 
     def fetch_card_prices_parallel(self, card):
-        enabled_sources = {
-            name: cfg['func']
-            for name, cfg in SCRAPER_CONFIG.items()
-            if self.source_vars[name].get()
-        }
-    
+        enabled_sources = {name: cfg['func'] for name, cfg in SCRAPER_CONFIG.items() if self.source_vars[name].get()}
         with ThreadPoolExecutor(max_workers=len(enabled_sources)) as executor:
-            futures = {
-                name: executor.submit(func, card)
-                for name, func in enabled_sources.items()
-                if name != "eBay"
-            }
-
+            futures = {name: executor.submit(func, card) for name, func in enabled_sources.items() if name != "eBay"}
         results = {}
         for name, future in futures.items():
             try:
@@ -793,17 +834,13 @@ class MTGScraperGUI:
             except Exception as e:
                 print(f"[{name} scrape error]: {e}")
                 results[name] = (0.0, "Error", "")
-
-    
         if "eBay" in enabled_sources:
             time.sleep(0.75)
             results["eBay"] = SCRAPER_CONFIG["eBay"]["func"](card)
-
         all_sources = SCRAPER_CONFIG.keys()
         prices = []
         urls = []
         display_data = {}
-
         for name in all_sources:
             if name in results:
                 result = results[name]
@@ -813,34 +850,27 @@ class MTGScraperGUI:
                 display_data[name] = f"{price:.2f}"
             else:
                 display_data[name] = "--"
-
         cheapest_price = min((p for _, p in prices if p > 0), default=0.0)
         cheapest_url = next((u for n, u in urls if n in results and results[n][0] == cheapest_price), '')
-    
-        return (card, display_data, cheapest_price, cheapest_url, results)   
-    
+        return (card, display_data, cheapest_price, cheapest_url, results)
+
     def open_cheapest_from_source(self, source):
         if not self.card_urls:
             messagebox.showinfo("No Results", "Please run a search first.")
             return
-    
         opened = 0
         for card, data in self.card_urls.items():
             cheapest_url = data.get("Cheapest", "")
             source_url = data.get("URLs", {}).get(source, "")
-    
             if source_url and source_url == cheapest_url:
                 webbrowser.open_new_tab(source_url)
                 opened += 1
-
         messagebox.showinfo("Done", f"Opened {opened} cheapest links from {source}.")
-
 
     def open_all_cheapest_by_source(self):
         if not self.card_urls:
             messagebox.showinfo("No Results", "Please run a search first.")
             return
-
         opened = 0
         for source in SCRAPER_CONFIG:
             for card, data in self.card_urls.items():
@@ -853,7 +883,6 @@ class MTGScraperGUI:
                 if url and price > 0:
                     webbrowser.open_new_tab(url)
                     opened += 1
-
         messagebox.showinfo("Done", f"Opened {opened} total links from all sources.")
 
     def check_prices(self):
@@ -863,69 +892,55 @@ class MTGScraperGUI:
         input_text = self.text_input.get('1.0', tk.END)
         cards = parse_decklist_from_input(input_text)
         total = 0.0
-
         for i, card in enumerate(cards, start=1):
             if self.stop_flag:
                 self.progress_label.config(text='Stopped.')
                 break
-
             card, display_data, cheapest, url, results = self.fetch_card_prices_parallel(card)
-
             row = [card]
             for source in SCRAPER_CONFIG:
                 row.append(display_data.get(source, "--"))
             row.append(f"{cheapest:.2f}")
-
             self.tree.insert('', 'end', values=tuple(row))
             self.card_urls[card] = {
                 'Cheapest': url,
                 'Prices': {source: display_data.get(source, "--") for source in SCRAPER_CONFIG},
                 'URLs': {source: results.get(source, (0.0, "", ""))[2] if results.get(source) else "" for source in SCRAPER_CONFIG}
             }
-
-
             total += cheapest
             self.total_label.config(text=f'Total: AU ${total:.2f}')
             self.progress_label.config(text=f'Processing: {i}/{len(cards)}')
             self.root.update_idletasks()
-
         self.progress_label.config(text='Done' if not self.stop_flag else 'Stopped.')
         self.button.config(text='Search Prices', state='normal')
         self.recalculate_cheapest_prices()
-
-
 
     def open_all_cheapest(self):
         if not self.card_urls:
             messagebox.showinfo("No Results", "Please run a search first.")
             return
-
         opened = 0
         for card, sources in self.card_urls.items():
             url = sources.get("Cheapest")
             if url:
                 webbrowser.open_new_tab(url)
                 opened += 1
-
         messagebox.showinfo("Done", f"Opened {opened} links in your browser.")
 
     def save_to_excel(self):
         if not self.card_urls:
             messagebox.showinfo("No Data", "You must search prices before saving.")
             return
-
         wb = Workbook()
         ws = wb.active
         ws.title = "MTG Card Prices"
         ws.append(["Card", "Price (AU$)", "Source", "URL"])
-
         for row_id in self.tree.get_children():
             row = self.tree.item(row_id)['values']
             card = row[0]
-            cheapest_price = row[len(SCRAPER_CONFIG) + 1] 
+            cheapest_price = row[len(SCRAPER_CONFIG) + 1]
             urls = self.card_urls.get(card, {})
             url = urls.get("Cheapest", "")
-
             source = ""
             if url:
                 for name in SCRAPER_CONFIG:
@@ -935,13 +950,10 @@ class MTGScraperGUI:
                         if name.lower().replace(" ", "") in url.replace("www.", "").lower():
                             source = name
                             break
-
             ws.append([card, cheapest_price, source, url])
-
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"MTG_Price_Report_{timestamp}.xlsx"
         filepath = os.path.join(os.path.expanduser("~/Downloads"), filename)
-
         try:
             wb.save(filepath)
             messagebox.showinfo("Success", f"Excel file saved to:\n{filepath}")
@@ -958,9 +970,99 @@ class MTGScraperGUI:
             if url:
                 webbrowser.open_new_tab(url)
 
+    def refresh_deck_dropdown(self):
+        names = list(self.deck_cache.keys())
+        self.deck_dropdown["values"] = names
+
+        if not names:
+            self.deck_dropdown.set("Select saved deck")
+            self.deck_dropdown.configure(foreground="grey")
+        else:
+            current = self.deck_var.get()
+            if current not in names:
+                self.deck_dropdown.set("Select saved deck")
+                self.deck_dropdown.configure(foreground="grey")
+
+
+
+    def save_deck(self):
+        url = self.url_entry.get().strip()
+        deck_text = self.text_input.get("1.0", tk.END).strip()
+        if not url or not deck_text:
+            messagebox.showwarning("Error", "Need both a deck URL and decklist to save.")
+            return
+
+        deck_name = None
+
+        if "archidekt.com/decks/" in url:
+            try:
+                slug = url.rstrip("/").split("/")[-1]
+                deck_name = slug.replace("_", " ").title()
+            except Exception as e:
+                print(f"[Archidekt name parse error] {e}")
+
+        if not deck_name and hasattr(self, "parsed_deck_name") and self.parsed_deck_name:
+            deck_name = self.parsed_deck_name
+
+        if not deck_name and "moxfield.com" in url:
+            try:
+                resp = requests.get(url, timeout=15)
+                soup = BeautifulSoup(resp.text, "html.parser")
+                tag = soup.select_one("span.deckHeader_deckName__OlKwW")
+                if tag:
+                    deck_name = tag.get_text(strip=True)
+            except Exception as e:
+                print(f"[Deck name fetch error] {e}")
+
+        if not deck_name:
+            deck_name = f"Deck {len(self.deck_cache)+1}"
+
+        self.deck_cache[deck_name] = {
+            "url": url,
+            "decklist": deck_text
+        }
+        save_deck_cache(self.deck_cache)
+        self.refresh_deck_dropdown()
+        messagebox.showinfo("Saved", f"Deck saved as '{deck_name}'")
+
+    def delete_deck(self):
+        name = self.deck_var.get()
+        if name in self.deck_cache:
+            del self.deck_cache[name]
+            save_deck_cache(self.deck_cache)
+            self.refresh_deck_dropdown()
+
+            self.url_entry.delete(0, tk.END)
+            self.url_entry.insert(0, "Paste a deck link")
+            self.url_entry.config(fg="grey")
+
+            self.text_input.delete("1.0", tk.END)
+
+            self.deck_dropdown.set("Select saved deck")
+            self.deck_dropdown.configure(foreground="grey")
+
+            messagebox.showinfo("Deleted", f"Removed deck '{name}'")
+        else:
+            messagebox.showwarning("Error", "No saved deck selected to delete.")
+
+
+    def load_saved_deck(self, event=None):
+        name = self.deck_var.get()
+        if name and name in self.deck_cache:
+            data = self.deck_cache[name]
+
+            self.url_entry.delete(0, tk.END)
+            self.url_entry.insert(0, data.get("url", ""))
+            self.url_entry.config(fg="black")
+
+            self.text_input.delete("1.0", tk.END)
+            self.text_input.insert(tk.END, data.get("decklist", ""))
+
+            self.deck_dropdown.configure(foreground="black")
+
 
 if __name__ == '__main__':
-    root = tk.Tk()
+    root = TkinterDnD.Tk()  
     app = MTGScraperGUI(root)
     root.mainloop()
 
