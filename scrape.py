@@ -614,6 +614,8 @@ class MTGScraperGUI:
         self.fetch_button = tk.Button(url_frame, text="Fetch", command=self.fetch_deck_from_url)
         self.fetch_button.pack(side="left", padx=2)
 
+        self.last_selected_row = None
+
         self.save_deck_button = tk.Button(url_frame, text="Save", command=self.save_deck)
         self.save_deck_button.pack(side="left", padx=2)
 
@@ -656,8 +658,17 @@ class MTGScraperGUI:
 
         self.tree = ttk.Treeview(frame, columns=('Card',) + tuple(SCRAPER_CONFIG.keys()) + ('Cheapest',), show='headings')
         for col in self.tree['columns']:
-            self.tree.heading(col, text=col)
+            self.tree.heading(col, text=col, command=lambda c=col: self.sort_treeview(c, False))
             self.tree.column(col, width=100)
+
+        self.context_menu = tk.Menu(self.tree, tearoff=0)
+
+        for source in SCRAPER_CONFIG.keys():
+            self.context_menu.add_command(
+                label=f"Open from {source}",
+                command=lambda s=source: self.open_from_source(s)
+            )
+
         scrollbar = ttk.Scrollbar(frame, orient='vertical', command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.pack(side='left', fill='both', expand=True)
@@ -670,10 +681,35 @@ class MTGScraperGUI:
         self.total_label = tk.Label(root, text='Total: AU $0.00', font=('Helvetica', 12, 'bold'))
         self.total_label.pack(pady=5)
 
+        self.tree.bind("<Button-3>", self.show_context_menu) 
+
         bottom_frame = tk.Frame(root)
         bottom_frame.pack(side="bottom", fill="x", padx=5, pady=5)
         self.open_all_button = tk.Button(bottom_frame, text='Open All Cheapest', command=self.open_all_cheapest)
         self.open_all_button.pack(side="right", padx=5, pady=2)
+
+    def show_context_menu(self, event):
+        selected = self.tree.identify_row(event.y)
+        if selected:
+            self.tree.selection_set(selected) 
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+
+
+    def sort_treeview(self, col, reverse=False):
+        rows = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
+    
+        def try_float(val):
+            try:
+                return float(val)
+            except:
+                return val.lower() if isinstance(val, str) else val
+
+        rows.sort(key=lambda t: try_float(t[0]), reverse=reverse)
+
+        for index, (val, k) in enumerate(rows):
+            self.tree.move(k, '', index)
+
+        self.tree.heading(col, command=lambda: self.sort_treeview(col, not reverse))
 
     def clear_placeholder(self, event=None):
         if self.url_entry.get() == "Paste a deck link":
@@ -867,6 +903,19 @@ class MTGScraperGUI:
                 opened += 1
         messagebox.showinfo("Done", f"Opened {opened} cheapest links from {source}.")
 
+    def open_from_source(self, source):
+        selected = self.tree.selection()
+        if not selected:
+            return
+        row_id = selected[0]
+        card_name = self.tree.item(row_id)['values'][0]
+        url = self.card_urls.get(card_name, {}).get("URLs", {}).get(source, "")
+        if url:
+            webbrowser.open_new_tab(url)
+        else:
+            messagebox.showinfo("No Link", f"No {source} link available for {card_name}.")
+
+
     def open_all_cheapest_by_source(self):
         if not self.card_urls:
             messagebox.showinfo("No Results", "Please run a search first.")
@@ -962,13 +1011,21 @@ class MTGScraperGUI:
 
     def on_click(self, event):
         selected = self.tree.selection()
-        if selected:
-            item = self.tree.item(selected[0])
+        if not selected:
+            return
+
+        row_id = selected[0]
+
+        if self.last_selected_row == row_id:
+            item = self.tree.item(row_id)
             card_name = item['values'][0]
             urls = self.card_urls.get(card_name, {})
             url = urls.get("Cheapest")
             if url:
                 webbrowser.open_new_tab(url)
+        else:
+            self.last_selected_row = row_id
+
 
     def refresh_deck_dropdown(self):
         names = list(self.deck_cache.keys())
