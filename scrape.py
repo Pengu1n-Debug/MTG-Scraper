@@ -229,10 +229,7 @@ import requests
 from bs4 import BeautifulSoup
 
 def scrape_cardhub(card_name):
-    import requests, re
-    from bs4 import BeautifulSoup
-
-    def normalize(text: str) -> str:
+    def normalize(text):
         text = text.lower()
         text = re.sub(r"[^a-z0-9\s-]", "", text)
         text = re.sub(r"\s+", " ", text)
@@ -249,46 +246,61 @@ def scrape_cardhub(card_name):
         soup = BeautifulSoup(response.text, "html.parser")
 
         results = []
-        items = soup.select("div.product-card-list2")
+        items = soup.select("div.h4.grid-view-item__title")
         print(f"[CardHub] Searching for: {card_name}")
-        print(f"[CardHub] Found {len(items)} product cards")
+        print(f"[CardHub] Found {len(items)} product titles")
 
-        for idx, card_div in enumerate(items, 1):
-            
-            title_tag = card_div.select_one(".grid-view-item__title")
-            if not title_tag:
-                continue
-            title = title_tag.get_text(strip=True)
-            title_norm = normalize(title.split("(")[0].split("[")[0])
-            if title_norm != target:
-                print(f"[CardHub] Skipping #{idx}, title mismatch: '{title_norm}' != '{target}'")
-                continue
-
-          
-            if card_div.select_one(".outstock-overlay") or "grid-view-item--sold-out" in card_div.get("class", []):
-                print(f"[CardHub] Skipping #{idx}, marked SOLD OUT: {title}")
-                continue
-
-           
-            price_tag = card_div.select_one(".product-price__price")
+        for idx, title_div in enumerate(items, 1):
+            title = title_div.get_text(strip=True)
+            price_tag = title_div.find_next("span", class_="product-price__price")
             if not price_tag:
+                print(f"[CardHub Error] Skipping #{idx}, no price tag")
                 continue
+
             price_match = re.search(r"\$([\d.,]+)", price_tag.get_text())
             if not price_match:
                 continue
             price = float(price_match.group(1).replace(",", ""))
 
-           
-            link_tag = card_div.select_one("a[href]")
+            title_norm = normalize(title.split("(")[0].split("[")[0])
+
+            if title_norm != target:
+                print(f"[CardHub] Skipping #{idx}, title mismatch: '{title_norm}' != '{target}'")
+                continue
+
+            link_tag = title_div.find_parent("a")
             link = link_tag["href"] if link_tag else ""
             if link and not link.startswith("http"):
                 link = "https://thecardhubaustralia.com.au" + link
 
+            try:
+                product_resp = requests.get(link, headers=headers, timeout=15)
+                product_resp.raise_for_status()
+                product_soup = BeautifulSoup(product_resp.text, "html.parser")
+
+                if product_soup.select_one(".product-info.product-soldout"):
+                    print(f"[CardHub] Skipping #{idx}, product-soldout container found: {title}")
+                    continue
+
+                add_to_cart_btn = product_soup.select_one(".product-form__item--submit button")
+                if add_to_cart_btn:
+                    btn_text = add_to_cart_btn.get_text(strip=True).lower()
+                    is_disabled = add_to_cart_btn.has_attr("disabled")
+                    if "sold out" in btn_text or is_disabled:
+                        print(f"[CardHub] Skipping #{idx}, sold out via button: {title}")
+                        continue
+                else:
+                    print(f"[CardHub Warning] Could not find add-to-cart button on {link}")
+                    continue
+
+            except Exception as e:
+                print(f"[CardHub Error] Failed stock check for {link}: {e}")
+                continue
+
             results.append((price, title, link))
-            print(f"[CardHub] Added #{idx}: {title} | ${price:.2f}")
 
         if not results:
-            print("[CardHub] No valid in-stock results found")
+            print("[CardHub] No valid CardHub results found")
             return 0.0, "Out of stock", ""
 
         cheapest = min(results, key=lambda x: x[0])
@@ -296,10 +308,9 @@ def scrape_cardhub(card_name):
         return cheapest
 
     except Exception as e:
-        print(f"[CardHub error] {e}")
+        print(f"[CardHub] {e}")
         return 0.0, "Error", ""
 
-    
 def scrape_ggadelaide(card_name: str):
     return scrape_gg(card_name, base_url="https://ggadelaide.com.au")
 
