@@ -724,7 +724,6 @@ class MTGScraperGUI:
         self.toggles_menu.add_separator()
         self.toggles_menu.add_checkbutton(label="Include Sideboard", variable=self.include_sideboard)
         self.toggles_menu.add_checkbutton(label="Include Maybeboard", variable=self.include_maybeboard)
-        self.toggles_menu.add_checkbutton(label="Use Set Code/Number in Search", variable=self.use_set_info)
 
         self.toggles_button.config(menu=self.toggles_menu)
         self.toggles_button.pack(side="left", padx=5, pady=2)
@@ -773,6 +772,9 @@ class MTGScraperGUI:
 
         self.delete_deck_button = tk.Button(url_frame, text="Delete", command=self.delete_deck)
         self.delete_deck_button.pack(side="left", padx=2)
+
+        self.set_search_button = tk.Checkbutton(url_frame, text="Use Set Code/Number", variable=self.use_set_info)
+        self.set_search_button.pack(side="left", padx=5)
 
         self.deck_cache = load_deck_cache()
         self.refresh_deck_dropdown()
