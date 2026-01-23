@@ -181,21 +181,48 @@ def fetch_mtgmate_price(card_name: str, set_code: str = None, collector_number: 
 
         qty = details.get("quantity", 0)
         if price > 0 and qty > 0:
-            card_set = details.get('set_name', '').lower()
+            link_path = details.get('link_path', '')
             result = (
                 price,
                 f"{details.get('name')} ({details.get('set_name')}, {details.get('finish')})",
-                f"https://www.mtgmate.com.au{details.get('link_path', '')}"
+                f"https://www.mtgmate.com.au{link_path}"
             )
 
-            # If we have a set code and it matches, prioritize this result
-            if set_code and set_code.lower() in card_set:
-                set_matched_results.append(result)
+            # Extract set code and collector number from URL path
+            # URL format: /cards/Card_Name/SET/NUMBER
+            path_parts = link_path.strip('/').split('/')
+            url_set_code = None
+            url_collector_number = None
+            if len(path_parts) >= 3:
+                url_set_code = path_parts[-2].upper()  # e.g., "WAR"
+                url_collector_number = path_parts[-1]   # e.g., "221"
+
+            # If set_code or collector_number is specified, only include exact matches
+            if set_code or collector_number:
+                set_match = True
+                collector_match = True
+
+                if set_code and url_set_code:
+                    set_match = set_code.upper() == url_set_code
+                elif set_code:
+                    set_match = False
+
+                if collector_number and url_collector_number:
+                    collector_match = collector_number == url_collector_number
+                elif collector_number:
+                    collector_match = False
+
+                if set_match and collector_match:
+                    set_matched_results.append(result)
+                # Skip non-matching results when filtering is active
             else:
                 results.append(result)
 
-    # Prefer set-matched results if available
-    all_results = set_matched_results + results
+    # When filtering by set/number, only use matched results
+    if set_code or collector_number:
+        all_results = set_matched_results
+    else:
+        all_results = results
 
     if not all_results:
         return (0.0, "Out of stock", "")
