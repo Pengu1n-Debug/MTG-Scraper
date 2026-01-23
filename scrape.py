@@ -599,6 +599,122 @@ def scrape_jenes(card_name: str, set_code=None, collector_number=None):
         print(f"[Jene's scrape error]: {e}")
         return (0.0, "Error", "")
 
+def scrape_shuffled(card_name: str, set_code: str = None, collector_number: str = None):
+    """
+    Scrape Shuffled.com.au search results for a given card.
+    Returns (cheapest_price, title, url) like other scrapers.
+    """
+    def normalize(text):
+        text = text.lower()
+        text = re.sub(r"[^a-z0-9\s]", "", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    target = normalize(card_name)
+    search_query = card_name.replace(' ', '+')
+    url = f"https://shuffled.com.au/search?q={search_query}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    print(f"\n[Shuffled] Searching for: {card_name}")
+    print(f"[Shuffled] Visiting URL: {url}")
+
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+
+        # Extract the meta JSON from the page
+        meta_match = re.search(r'var\s+meta\s*=\s*(\{.*?\});', response.text, re.DOTALL)
+        if not meta_match:
+            print("[Shuffled] Could not find meta JSON in page")
+            return (0.0, "Not found", "")
+
+        try:
+            meta_data = json.loads(meta_match.group(1))
+        except json.JSONDecodeError as e:
+            print(f"[Shuffled] JSON parsing error: {e}")
+            return (0.0, "Error", "")
+
+        products = meta_data.get("products", [])
+        print(f"[Shuffled] Found {len(products)} products")
+
+        results = []
+        set_matched_results = []
+
+        for product in products:
+            handle = product.get("handle", "")
+            variants = product.get("variants", [])
+
+            for variant in variants:
+                variant_name = variant.get("name", "")
+                price_cents = variant.get("price", 0)
+
+                if price_cents <= 0:
+                    continue
+
+                price = price_cents / 100.0
+
+                # Extract card name from variant (before the set code in parentheses)
+                name_match = re.match(r'^([^(]+)', variant_name)
+                if not name_match:
+                    continue
+
+                product_card_name = normalize(name_match.group(1).strip())
+
+                # Check if card name matches
+                if product_card_name != target:
+                    continue
+
+                # Extract set code and collector number from variant name
+                # Format: "Card Name (SET-NUMBER) - Set Name - Condition"
+                set_info_match = re.search(r'\(([A-Z0-9]+)-(\d+)\)', variant_name)
+                url_set_code = None
+                url_collector_number = None
+                if set_info_match:
+                    url_set_code = set_info_match.group(1).upper()
+                    url_collector_number = set_info_match.group(2).lstrip('0') or '0'  # Remove leading zeros
+
+                product_url = f"https://shuffled.com.au/products/{handle}"
+                result = (price, variant_name, product_url)
+
+                # If set_code or collector_number is specified, only include exact matches
+                if set_code or collector_number:
+                    set_match = True
+                    collector_match = True
+
+                    if set_code and url_set_code:
+                        set_match = set_code.upper() == url_set_code
+                    elif set_code:
+                        set_match = False
+
+                    if collector_number and url_collector_number:
+                        # Compare without leading zeros
+                        collector_match = collector_number.lstrip('0') == url_collector_number
+                    elif collector_number:
+                        collector_match = False
+
+                    if set_match and collector_match:
+                        set_matched_results.append(result)
+                else:
+                    results.append(result)
+
+        # When filtering by set/number, only use matched results
+        if set_code or collector_number:
+            all_results = set_matched_results
+        else:
+            all_results = results
+
+        if not all_results:
+            print("[Shuffled] No valid results found")
+            return (0.0, "Out of stock", "")
+
+        cheapest = min(all_results, key=lambda x: x[0])
+        print(f"[Shuffled] Cheapest: {cheapest}")
+        return cheapest
+
+    except Exception as e:
+        print(f"[Shuffled] Error: {e}")
+        return (0.0, "Error", "")
+
 def parse_decklist_from_input(text):
     cards = []
     for line in text.strip().splitlines():
@@ -673,13 +789,14 @@ def save_deck_cache(cache):
         json.dump(cache, f, indent=2)
 
 SCRAPER_CONFIG = {
-    "MoonMTG": {"enabled": True, "func": scrape_moonmtg}, 
+    "MoonMTG": {"enabled": True, "func": scrape_moonmtg},
     "MTGMate": {"enabled": True, "func": fetch_mtgmate_price},
     "CardHub": {"enabled": True, "func": scrape_cardhub},
     "JenesMTG": {"enabled": True, "func": scrape_jenes},
+    "Shuffled": {"enabled": True, "func": scrape_shuffled},
     "GGAustralia": {"enabled": True, "func": scrape_ggadelaide},
     "GGModbury": {"enabled": True, "func": scrape_ggmodbury},
-    "GGAdelaide": {"enabled": True, "func": scrape_ggadelaide}, 
+    "GGAdelaide": {"enabled": True, "func": scrape_ggadelaide},
 }
 
 SOURCE_TO_COLUMN = {
@@ -687,6 +804,7 @@ SOURCE_TO_COLUMN = {
     "MTGMate": "MTGMate",
     "CardHub": "CardHub",
     "JenesMTG": "Jenes",
+    "Shuffled": "Shuffled",
     "GGAustralia": "GGTCG",
     "GGModbury": "GGModbury",
     "GGAdelaide": "GoodGames",
