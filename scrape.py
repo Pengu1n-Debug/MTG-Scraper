@@ -965,7 +965,20 @@ class MTGScraperGUI:
                     continue
                 filtered.append(c)
 
-            deck_text = "\n".join([f"{c.quantity} {c.name}" for c in filtered])
+            # Build deck text with set code and collector number if checkbox is enabled
+            deck_lines = []
+            for c in filtered:
+                if self.use_set_info.get() and (c.extension or c.number):
+                    # Format: "1 Card Name (SET) 123"
+                    line = f"{c.quantity} {c.name}"
+                    if c.extension:
+                        line += f" ({c.extension})"
+                    if c.number:
+                        line += f" {c.number}"
+                    deck_lines.append(line)
+                else:
+                    deck_lines.append(f"{c.quantity} {c.name}")
+            deck_text = "\n".join(deck_lines)
 
             self.text_input.delete('1.0', tk.END)
             self.text_input.insert(tk.END, deck_text)
