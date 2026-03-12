@@ -31,112 +31,127 @@ session = httpx.Client(headers={
     'Accept-Encoding': 'gzip, deflate, br'
 }, http2=True, follow_redirects=True, timeout=30.0)
 
-def scrape_moonmtg(card_name, set_code=None, collector_number=None):
-    BASE_URL = 'https://moonmtg.com/products/'
-    import re
-    import requests
+class RateLimiter:
+    def __init__(self, interval: float):
+        self.interval = interval
+        self.next_time = time.time()
+
+    def wait(self):
+        now = time.time()
+        if now < self.next_time:
+            time.sleep(self.next_time - now)
+        self.next_time = time.time() + self.interval
+
+def scrape_moonmtg(query: str):
+    import requests, re
     from bs4 import BeautifulSoup
+    BASE_URL = "https://moonmtg.com/products/"
 
-    def name_to_handle(card_name):
-        handle = card_name.lower()
-        handle = re.sub(r"[’'\":,?!()]", '', handle)
-        handle = re.sub(r'[^a-z0-9\s-]', '', handle)
-        handle = re.sub(r'\s+', '-', handle)
-        handle = handle.strip('-')
-        return handle
+    card_name, set_code, number, foil, etched = parse_card_query(query)
 
-    def normalize_name(name):
-        name = name.lower()
-        name = re.sub(r"[’'\":,?!()]", '', name)
-        name = re.sub(r'[^a-z0-9\s]', '', name)
-        return name.strip()
+    handle = card_name.lower()
+    handle = re.sub(r"[’'\":,?!()]", "", handle)
+    handle = re.sub(r"[^a-z0-9\s-]", "", handle)
+    handle = re.sub(r"\s+", "-", handle)
+    handle = handle.strip("-")
 
-    def fetch_product_json(handle):
-        url = f'{BASE_URL}{handle}.json'
+    def normalize_variant_title(title: str) -> str:
+        t = title.upper()
+        t = re.sub(r"\[.*?\]", "", t)
+        t = re.sub(r"\(.*?\)", "", t)
+        return t.strip()
+
+    try:
+        r = requests.get(f"{BASE_URL}{handle}.json", timeout=15)
+        if r.status_code != 200:
+            return (0.0, "Not found", "")
+        product = r.json().get("product", {})
+    except Exception:
+        return (0.0, "Not found", "")
+
+    variants = product.get("variants", [])
+    matches = []
+
+    for v in variants:
+        title = v.get("title", "").upper()
+        normalized = normalize_variant_title(title)
+        vid = v.get("id")
         try:
-            response = requests.get(url)
-            if response.status_code == 200:
-                return response.json()
+            price = float(v.get("price", 0))
         except:
-            pass
-        return None
+            price = 0.0
+        if price <= 0:
+            continue
 
-    def fetch_variant_stock(handle, variant_id):
-        variant_url = f'{BASE_URL}{handle}?variant={variant_id}'
         try:
-            response = requests.get(variant_url)
-            if response.status_code != 200:
-                return 'Unknown'
-            soup = BeautifulSoup(response.text, 'html.parser')
-            inventory_element = soup.find('p', class_='product__inventory')
-            return inventory_element.get_text(strip=True) if inventory_element else 'Stock info not found'
-        except:
-            return 'Unknown'
+            s = requests.get(f"{BASE_URL}{handle}?variant={vid}", timeout=15)
+            if s.status_code != 200:
+                continue
+            soup = BeautifulSoup(s.text, "html.parser")
+            inv = soup.find("p", class_="product__inventory")
+            stock_status = inv.get_text(strip=True) if inv else "Unknown"
+            if stock_status in ["Out of stock", "Unknown", "Stock info not found"]:
+                continue
+        except Exception:
+            continue
 
-    handle = name_to_handle(card_name)
-    product_json = fetch_product_json(handle)
-    success = False
-    if product_json:
-        product = product_json['product']
-        if normalize_name(card_name) in normalize_name(product['title']):
-            success = True
-    if not success:
-        handle += '-1'
-        product_json = fetch_product_json(handle)
-        if not product_json:
-            return (0.0, 'Not found', '')
-        product = product_json['product']
-        if normalize_name(card_name) not in normalize_name(product['title']):
-            return (0.0, 'Not found', '')
-    in_stock_variants = []
-    set_matched_variants = []
-    for variant in product['variants']:
-        price = float(variant['price'])
-        variant_id = variant['id']
-        variant_title = variant['title']
-        stock_status = fetch_variant_stock(handle, variant_id)
-        if stock_status not in ['Out of stock', 'Stock info not found', 'Unknown']:
-            variant_data = (variant_title, price, variant_id)
+        url = f"{BASE_URL}{handle}?variant={vid}"
 
-            set_match = True
-            collector_match = True
+        if set_code and number:
+            if normalized.startswith(f"{set_code} {number}") or normalized.startswith(f"{set_code}-{number}"):
+                if foil and "FOIL" not in title:
+                    continue
+                if etched and "ETCHED" not in title:
+                    continue
+                return (price, title, url)
+        elif set_code and normalized.startswith(set_code):
+            if foil and "FOIL" not in title:
+                continue
+            if etched and "ETCHED" not in title:
+                continue
+            matches.append((price, title, url))
+        elif not set_code:
+            matches.append((price, title, url))
 
-            if set_code:
-                set_pattern = re.search(r'\[([^\]]+)\]', variant_title)
-                if set_pattern:
-                    card_set = set_pattern.group(1).strip().lower()
-                    set_match = set_code.lower() in card_set or card_set in set_code.lower()
-                else:
-                    set_match = False
+    if matches:
+        return min(matches, key=lambda x: x[0])
+    return (0.0, "Not found", "")
 
-            if collector_number:
-                num_pattern = re.search(r'#(\d+)', variant_title)
-                if num_pattern:
-                    card_number = num_pattern.group(1)
-                    collector_match = card_number == collector_number
-                else:
-                    collector_match = False
+def parse_card_query(query: str):
+    import re
+    query = query.strip()
+    foil = "*F*" in query
+    etched = "*E*" in query
+    query = query.replace("*F*", "").replace("*E*", "").strip()
 
-            if set_code and collector_number and set_match and collector_match:
-                set_matched_variants.append(variant_data)
-            elif set_code and not collector_number and set_match:
-                set_matched_variants.append(variant_data)
-            elif not set_code:
-                in_stock_variants.append(variant_data)
+    set_code = None
+    number = None
 
-    all_variants = set_matched_variants + in_stock_variants
+    set_match = re.search(r"\(([a-z0-9]+)\)", query, re.IGNORECASE)
+    if set_match:
+        set_code = set_match.group(1).upper()
+        query = query.replace(set_match.group(0), "").strip()
 
-    if not all_variants:
-        return (0.0, 'Out of stock', '')
-    title, price, variant_id = sorted(all_variants, key=lambda x: x[1])[0]
-    return (price, title, f'{BASE_URL}{handle}?variant={variant_id}')
+    id_match = re.search(r"([A-Z0-9]+)-(\d+[a-z]*)", query, re.IGNORECASE)
+    if id_match:
+        set_code = id_match.group(1).upper()
+        number = id_match.group(2)
+        query = query.replace(id_match.group(0), "").strip()
+    else:
+        num_match = re.search(r"(\d+[a-z]*)$", query, re.IGNORECASE)
+        if num_match:
+            number = num_match.group(1)
+            query = query[:num_match.start()].strip()
 
-def fetch_mtgmate_price(card_name: str, set_code: str = None, collector_number: str = None):
-    """
-    Scrape MTGMate search results for a given card.
-    Returns (cheapest_price, title, url) like other scrapers.
-    """
-    # MTGMate doesn't support set-based search, use card name only
+    card_name = query.strip()
+    return card_name, set_code, number, foil, etched
+
+import cloudscraper
+from bs4 import BeautifulSoup
+import json
+import re
+
+def fetch_mtgmate_price(card_name: str, set_name: str = None, set_code: str = None, number: str = None, foil: bool = None):
     url = f"https://www.mtgmate.com.au/cards/search?q={card_name.replace(' ', '+')}"
     scraper = cloudscraper.create_scraper()
 
@@ -144,29 +159,28 @@ def fetch_mtgmate_price(card_name: str, set_code: str = None, collector_number: 
         r = scraper.get(url, timeout=20)
         r.raise_for_status()
     except Exception as e:
-        print(f"[MTGMate] Request failed: {e}")
+        print(f"[DEBUG] Request failed: {e}")
         return (0.0, "Error", "")
 
     soup = BeautifulSoup(r.text, "html.parser")
     container = soup.find("div", {"data-react-class": "FilterableTable"})
     if not container:
-        print("[MTGMate] Could not find FilterableTable div.")
         return (0.0, "Not found", "")
 
     raw_props = container.get("data-react-props")
     if not raw_props:
-        print("[MTGMate] No data-react-props found.")
         return (0.0, "Not found", "")
 
     try:
         data = json.loads(raw_props)
     except Exception as e:
-        print(f"[MTGMate] JSON parsing error: {e}")
+        print(f"[DEBUG] JSON parsing error: {e}")
         return (0.0, "Error", "")
 
     uuid_map = data.get("uuid", {})
     results = []
-    set_matched_results = []
+
+    target_norm = normalize_name(card_name)
 
     for card in data.get("cards", []):
         card_id = card.get("uuid")
@@ -174,84 +188,79 @@ def fetch_mtgmate_price(card_name: str, set_code: str = None, collector_number: 
         if not details:
             continue
 
+        product_name = details.get("name", "")
+        product_norm = normalize_name(product_name)
+
+        # ❗ FULL NAME MATCHING — FIX
+        if product_norm != target_norm:
+            continue
+
         try:
             price = int(details.get("price", 0)) / 100
-        except (TypeError, ValueError):
+        except:
             price = 0.0
 
         qty = details.get("quantity", 0)
-        if price > 0 and qty > 0:
-            link_path = details.get('link_path', '')
-            result = (
-                price,
-                f"{details.get('name')} ({details.get('set_name')}, {details.get('finish')})",
-                f"https://www.mtgmate.com.au{link_path}"
-            )
+        if price <= 0 or qty <= 0:
+            continue
 
-            # Extract set code and collector number from URL path
-            # URL format: /cards/Card_Name/SET/NUMBER
-            path_parts = link_path.strip('/').split('/')
-            url_set_code = None
-            url_collector_number = None
-            if len(path_parts) >= 3:
-                url_set_code = path_parts[-2].upper()  # e.g., "WAR"
-                url_collector_number = path_parts[-1]   # e.g., "221"
+        link_path = details.get("link_path", "")
 
-            # If set_code or collector_number is specified, only include exact matches
-            if set_code or collector_number:
-                set_match = True
-                collector_match = True
+        match = re.search(r"/([A-Z0-9]+)/(\d+):?", link_path)
+        card_set_code = match.group(1) if match else ""
+        card_set_number = match.group(2) if match else ""
+        card_finish = details.get("finish", "").lower()
+        card_set_name = details.get("set_name", "")
 
-                if set_code and url_set_code:
-                    set_match = set_code.upper() == url_set_code
-                elif set_code:
-                    set_match = False
+        # optional filters (unchanged)
+        if set_name and card_set_name.lower() != set_name.lower():
+            continue
+        if set_code and card_set_code.lower() != set_code.lower():
+            continue
+        if number and card_set_number != number:
+            continue
+        if foil is not None and foil != ("foil" in card_finish):
+            continue
 
-                if collector_number and url_collector_number:
-                    collector_match = collector_number == url_collector_number
-                elif collector_number:
-                    collector_match = False
+        results.append((
+            price,
+            f"{product_name} ({card_set_name}, {details.get('finish')})",
+            f"https://www.mtgmate.com.au{link_path}",
+        ))
 
-                if set_match and collector_match:
-                    set_matched_results.append(result)
-                # Skip non-matching results when filtering is active
-            else:
-                results.append(result)
-
-    # When filtering by set/number, only use matched results
-    if set_code or collector_number:
-        all_results = set_matched_results
-    else:
-        all_results = results
-
-    if not all_results:
+    if not results:
         return (0.0, "Out of stock", "")
 
-    cheapest = min(all_results, key=lambda x: x[0])
-    print(f"[MTGMate] Cheapest: {cheapest}")
-    return cheapest
+    return min(results, key=lambda x: x[0])
 
-def scrape_gg(card_name, base_url, set_code=None, collector_number=None):
-    def normalize(text):
-        text = text.lower()
-        text = re.sub(r"[’'\":,?!()\[\]]", "", text)
-        text = re.sub(r"[^a-z0-9\s\-]", "", text)
-        text = re.sub(r"\s+", " ", text)
-        return text.strip()
+def normalize_name(text: str) -> str:
+    text = text.lower()
+    text = re.sub(r"[’'\":,?!()\[\]{}]", "", text)
+    text = re.sub(r"[^a-z0-9\s-]", "", text)
+    text = re.sub(r"\s+", " ", text)
+    text = text.strip()
 
-    target = normalize(card_name)
-    target_first = target.split()[0] if target else ""
+    text = text.split("(")[0].split("[")[0].strip()
+    return text
 
-    # Build search query with set code if available
-    search_query = card_name
-    if set_code:
-        search_query += f" {set_code}"
-    query = quote_plus(f"{search_query} product_type:\"mtg\"")
+def scrape_gg(card_name, base_url):
+
+    def extract_base_name(title):
+        title = title.split(" - ")[0]
+
+        title = re.sub(r"\[.*?\]", "", title)
+        title = re.sub(r"\(.*?\)", "", title)
+
+        title = title.lower()
+        title = re.sub(r"[^a-z0-9\s-]", "", title)
+        title = re.sub(r"\s+", " ", title)
+        return title.strip()
+
+    target = extract_base_name(card_name)
+    query = quote_plus(f"{card_name} product_type:\"mtg\"")
     url = f"{base_url}/search?q={query}"
-    headers = {"User-Agent": "Mozilla/5.0"}
 
-    print(f"\n[GG] Searching for: {card_name}")
-    print(f"[GG] Visiting URL: {url}")
+    headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
         response = requests.get(url, headers=headers, timeout=15)
@@ -260,50 +269,41 @@ def scrape_gg(card_name, base_url, set_code=None, collector_number=None):
 
         results = []
         items = soup.select("div.addNow.single")
-        print(f"[GG] Found {len(items)} product blocks")
 
         for idx, div in enumerate(items, 1):
             onclick = div.get("onclick", "")
             match = re.search(r"addToCart\([^,]+,'([^']+)'", onclick)
-            title = match.group(1).strip() if match else "N/A"
+            full_title = match.group(1).strip() if match else "N/A"
 
             price_tag = div.find("p")
             price_text = price_tag.get_text(strip=True) if price_tag else "N/A"
-            price_match = re.search(r"\$([\d.,]+)", price_text)
-            price = float(price_match.group(1).replace(",", "")) if price_match else 0.0
+            pm = re.search(r"\$([\d.,]+)", price_text)
+            price = float(pm.group(1).replace(",", "")) if pm else 0.0
 
-            title_norm = normalize(title)
-            title_first = title_norm.split()[0] if title_norm else ""
+            title_norm = extract_base_name(full_title)
 
-            print(f"[GG] #{idx} Title: {title} | Price: {price_text} | Parsed: {price}")
-            if title_first != target_first:
-                print(f"[GG] Skipping: '{title_first}' != '{target_first}'")
+            if title_norm != target:
                 continue
 
-            results.append((price, title, url))
+            results.append((price, full_title, url))
 
         if not results:
-            print("[GG] No valid GoodGames results found")
             return 0.0, "Out of stock", ""
 
-        cheapest = min(results, key=lambda x: x[0])
-        print(f"[GG] Cheapest GoodGames: {cheapest}")
-        return cheapest
+        return min(results, key=lambda x: x[0])
 
     except Exception as e:
-        print(f"[GG] {e}")
         return 0.0, "Error", ""
-
-def clean_name(title: str) -> str:
-    """Base card name: part before first '(' or '[' – lowercase, trimmed."""
-    base = re.split(r'[\(\[]', title, 1)[0]
-    return base.strip().lower()
 
 import re
 import requests
 from bs4 import BeautifulSoup
 
-def scrape_cardhub(card_name, set_code=None, collector_number=None):
+def scrape_gamesportal(card_name: str):
+    import re
+    import requests
+    from bs4 import BeautifulSoup
+
     def normalize(text):
         text = text.lower()
         text = re.sub(r"[^a-z0-9\s-]", "", text)
@@ -311,13 +311,7 @@ def scrape_cardhub(card_name, set_code=None, collector_number=None):
         return text.strip()
 
     target = normalize(card_name)
-
-    # Build search query with set code if available
-    search_query = card_name
-    if set_code:
-        search_query += f" {set_code}"
-
-    url = f"https://thecardhubaustralia.com.au/search?type=product&options%5Bprefix%5D=last&q={search_query.replace(' ', '+')}"
+    url = f"https://gamesportal.com.au/search?type=product&options%5Bprefix%5D=last&q={card_name.replace(' ', '+')}"
     headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
@@ -326,200 +320,322 @@ def scrape_cardhub(card_name, set_code=None, collector_number=None):
         soup = BeautifulSoup(response.text, "html.parser")
 
         results = []
-        items = soup.select("div.h4.grid-view-item__title")
-        print(f"[CardHub] Searching for: {card_name}")
-        print(f"[CardHub] Found {len(items)} product titles")
 
-        for idx, title_div in enumerate(items, 1):
-            title = title_div.get_text(strip=True)
-            price_tag = title_div.find_next("span", class_="product-price__price")
-            if not price_tag:
-                print(f"[CardHub Error] Skipping #{idx}, no price tag")
+        for card in soup.select("div.product-card-list2"):
+            title_tag = card.select_one(".grid-view-item__title")
+            if not title_tag:
+                continue
+            title = title_tag.get_text(strip=True)
+            if normalize(title.split("(")[0].split("[")[0]) != target:
                 continue
 
+            link_tag = card.select_one("a[href]")
+            link = link_tag["href"] if link_tag else ""
+            if link and not link.startswith("http"):
+                link = "https://gamesportal.com.au" + link
+
+            if card.select_one(".outstock-overlay"):
+                continue
+            if "grid-view-item--sold-out" in " ".join(card.get("class", [])):
+                continue
+
+            options = card.select("select.product-form__variants option")
+            if options:
+                all_disabled = all(
+                    opt.has_attr("disabled") or opt.get("data-available") == "0"
+                    for opt in options
+                )
+                if all_disabled:
+                    continue
+
+            price_tag = card.select_one(".product-price__price")
+            if not price_tag:
+                continue
             price_match = re.search(r"\$([\d.,]+)", price_tag.get_text())
             if not price_match:
                 continue
             price = float(price_match.group(1).replace(",", ""))
 
-            title_norm = normalize(title.split("(")[0].split("[")[0])
+            results.append((price, title, link))
 
-            if title_norm != target:
-                print(f"[CardHub] Skipping #{idx}, title mismatch: '{title_norm}' != '{target}'")
+        if not results:
+            return 0.0, "Out of stock", ""
+
+        return min(results, key=lambda x: x[0])
+
+    except Exception:
+        return 0.0, "Error", ""
+
+
+def scrape_cardhub(card_name: str):
+    import re
+    import requests
+    from bs4 import BeautifulSoup
+
+    def normalize(text):
+        text = text.lower()
+        text = re.sub(r"[^a-z0-9\s-]", "", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    target = normalize(card_name)
+    url = f"https://thecardhubaustralia.com.au/search?type=product&options%5Bprefix%5D=last&q={card_name.replace(' ', '+')}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        results = []
+
+        for card in soup.select("div.product-card-list2"):
+            title_tag = card.select_one(".grid-view-item__title")
+            if not title_tag:
+                continue
+            title = title_tag.get_text(strip=True)
+            if normalize(title.split("(")[0].split("[")[0]) != target:
                 continue
 
-            link_tag = title_div.find_parent("a")
+            link_tag = card.select_one("a[href]")
             link = link_tag["href"] if link_tag else ""
             if link and not link.startswith("http"):
                 link = "https://thecardhubaustralia.com.au" + link
 
-            try:
-                product_resp = requests.get(link, headers=headers, timeout=15)
-                product_resp.raise_for_status()
-                product_soup = BeautifulSoup(product_resp.text, "html.parser")
-
-                if product_soup.select_one(".product-info.product-soldout"):
-                    print(f"[CardHub] Skipping #{idx}, product-soldout container found: {title}")
-                    continue
-
-                add_to_cart_btn = product_soup.select_one(".product-form__item--submit button")
-                if add_to_cart_btn:
-                    btn_text = add_to_cart_btn.get_text(strip=True).lower()
-                    is_disabled = add_to_cart_btn.has_attr("disabled")
-                    if "sold out" in btn_text or is_disabled:
-                        print(f"[CardHub] Skipping #{idx}, sold out via button: {title}")
-                        continue
-                else:
-                    print(f"[CardHub Warning] Could not find add-to-cart button on {link}")
-                    continue
-
-            except Exception as e:
-                print(f"[CardHub Error] Failed stock check for {link}: {e}")
+            if card.select_one(".outstock-overlay"):
                 continue
+            if "grid-view-item--sold-out" in " ".join(card.get("class", [])):
+                continue
+
+            options = card.select("select.product-form__variants option")
+            if options:
+                all_disabled = all(
+                    opt.has_attr("disabled") or opt.get("data-available") == "0"
+                    for opt in options
+                )
+                if all_disabled:
+                    continue
+
+            price_tag = card.select_one(".product-price__price")
+            if not price_tag:
+                continue
+            price_match = re.search(r"\$([\d.,]+)", price_tag.get_text())
+            if not price_match:
+                continue
+            price = float(price_match.group(1).replace(",", ""))
 
             results.append((price, title, link))
 
         if not results:
-            print("[CardHub] No valid CardHub results found")
             return 0.0, "Out of stock", ""
 
-        cheapest = min(results, key=lambda x: x[0])
-        print(f"[CardHub] Cheapest CardHub: {cheapest}")
-        return cheapest
+        return min(results, key=lambda x: x[0])
 
-    except Exception as e:
-        print(f"[CardHub] {e}")
+    except Exception:
         return 0.0, "Error", ""
 
-def scrape_ggadelaide(card_name: str, set_code=None, collector_number=None):
-    return scrape_gg(card_name, base_url="https://ggadelaide.com.au", set_code=set_code, collector_number=collector_number)
+def scrape_ggadelaide(card_name: str):
+    return scrape_gg(card_name, base_url="https://ggadelaide.com.au")
 
+def scrape_ggmodbury(card_name: str):
+    return scrape_gg(card_name, base_url="https://ggmodbury.com.au")
 
-def scrape_ggmodbury(card_name: str, set_code=None, collector_number=None):
-    return scrape_gg(card_name, base_url="https://ggmodbury.com.au", set_code=set_code, collector_number=collector_number)
+def scrape_ggaustralia(card_name: str):
+    import re, requests, json, html
+    from bs4 import BeautifulSoup
+    from urllib.parse import quote_plus, urljoin
 
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+    def normalize(text):
+        text = html.unescape(text)
+        text = text.lower()
+        text = re.sub(r"[’'`]", "", text)
+        text = re.sub(r"[^a-z0-9\s-]", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
 
-def scrape_ggaustralia(card_name: str, set_code=None, collector_number=None):
-    def normalize(name: str) -> str:
-        name = re.split(r'[\(\[]', name)[0]
-        name = name.lower()
-        name = re.sub(r"[’'\":,?!()\[\]]", "", name)
-        name = re.sub(r"[^a-z0-9\s\-]", "", name)
-        name = re.sub(r"\s+", " ", name)
-        return name.strip()
+    def slugify(text):
+        text = html.unescape(text)
+        text = text.lower()
+        text = re.sub(r"[’'`]", "", text)
+        text = re.sub(r"[^a-z0-9]+", "-", text)
+        text = re.sub(r"-{2,}", "-", text)
+        return text.strip("-")
 
-    target_normalized = normalize(card_name)
+    def find_matching_bracket(text: str, open_pos: int) -> int:
+        n = len(text)
+        if open_pos < 0 or open_pos >= n or text[open_pos] != "{":
+            return -1
+        depth = 0
+        in_str = False
+        str_char = None
+        esc = False
+        for i in range(open_pos, n):
+            ch = text[i]
+            if esc:
+                esc = False
+                continue
+            if ch == "\\" and in_str:
+                esc = True
+                continue
+            if ch in ('"', "'"):
+                if not in_str:
+                    in_str = True
+                    str_char = ch
+                elif ch == str_char:
+                    in_str = False
+                    str_char = None
+                continue
+            if not in_str:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return i
+        return -1
 
-    # Build search query with set code if available
-    search_query = card_name
-    if set_code:
-        search_query += f" {set_code}"
-
-    url = (
-        f"https://tcg.goodgames.com.au/search?q={search_query.replace(' ', '+')}"
-        f"&s=-isActive,new_discounted_price,-_rank&f_Availability=Exclude+Out+Of+Stock"
-    )
-
-    print(f"\n[GGAustralia] Searching for: {card_name}")
-    print(f"[GGAustralia] Visiting URL: {url}")
+    target = normalize(card_name)
+    query = quote_plus(card_name)
+    search_url = f"https://tcg.goodgames.com.au/search?q={query}&f_Product%20Type=mtg+single"
+    headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
-        options = Options()
-        options.add_argument("--headless=new")   
-        options.add_argument("--disable-gpu")
-        options.add_argument("--no-sandbox")
+        r = requests.get(search_url, headers=headers, timeout=15)
+        r.raise_for_status()
+        page_text = r.text
+    except Exception as e:
+        print(f"[GGAustralia fetch error] {e}")
+        return 0.0, "Error", ""
 
-        driver = webdriver.Chrome(options=options)
-        driver.get(url)
+    candidates = []
 
+    key_pattern = re.compile(r"Spurit\.Preorder2\.snippet\.products\[\s*['\"]([^'\"]+)['\"]\s*\]\s*=", re.S)
+    for m in key_pattern.finditer(page_text):
+        after_eq = m.end()
+        brace_pos = page_text.find("{", after_eq)
+        if brace_pos == -1:
+            continue
+        end_pos = find_matching_bracket(page_text, brace_pos)
+        if end_pos == -1:
+            continue
+        block = page_text[brace_pos:end_pos + 1]
+        fixed = re.sub(r'([{\s,])([A-Za-z0-9_]+)\s*:', r'\1"\2":', block)
+        fixed = fixed.replace("'", '"')
+        fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
         try:
-            WebDriverWait(driver, 12).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".st-product"))
-            )
+            obj = json.loads(fixed)
         except Exception:
-            print("[GGAustralia] Product containers did not appear in time.")
+            continue
 
-        soup = BeautifulSoup(driver.page_source, "html.parser")
-        product_containers = soup.select(".st-product")
+        title = obj.get("title", "")
+        base_title = title.split("[")[0].strip()
+        normalized_title = normalize(base_title)
+        if target != normalized_title:
+            continue
 
-        if not product_containers:
-            print("[GGAustralia] No product containers found. Page source preview:")
-            print(driver.page_source[:2000])  
+        handle = obj.get("handle", "")
+        for v in obj.get("variants", []):
+            qty = int(v.get("inventory_quantity", 0) or 0)
+            if qty <= 0:
+                continue
+            price_cents = v.get("price")
+            if price_cents is None:
+                continue
+            try:
+                price = float(price_cents) / 100.0
+            except Exception:
+                continue
+            if price > 0:
+                variant_title = v.get("title", "")
+                variant_id = v.get("id")
+                product_url = f"https://tcg.goodgames.com.au/products/{handle}"
+                if variant_id:
+                    product_url += f"?variant={variant_id}"
+                candidates.append((price, f"{title} — {variant_title}", product_url))
 
-        driver.quit()
+    if candidates:
+        return min(candidates, key=lambda x: x[0])
 
-        print(f"[GGAustralia] Found {len(product_containers)} product containers")
+    try:
+        json_url = (
+            "https://tcg.goodgames.com.au/search.json?"
+            f"q={query}"
+            "&f_Product%20Type=mtg+single"
+        )
+        r2 = requests.get(json_url, headers=headers, timeout=15)
+        r2.raise_for_status()
+        products = []
+        try:
+            payload = r2.json()
+            products = payload.get("product_data") or payload.get("products") or payload.get("data", {}).get("product_data", [])
+        except Exception:
+            products = []
 
         results = []
-        for i, prod in enumerate(product_containers, 1):
-            print(f"\n[GGAustralia] --- Product #{i} ---")
-
-            title_tag = prod.select_one(".product-title span")
-            title = title_tag.get_text(strip=True) if title_tag else "N/A"
-            normalized_title = normalize(title)
-
-            if normalized_title != target_normalized:
-                print(f"[GGAustralia] Skipping: '{title}' does not match '{card_name}'")
+        for prod in products:
+            if str(prod.get("brand", "")).lower() != "magic: the gathering":
                 continue
-
-            price_tag = (
-                prod.select_one(".price.no_sale")
-                or prod.select_one(".discounted_price")
-                or prod.select_one(".price")
-            )
-            price_str = price_tag.get_text(strip=True) if price_tag else None
-
-            link_tag = prod.select_one(".product-title a")
-            link = (
-                link_tag["href"]
-                if link_tag and "href" in link_tag.attrs
-                else "https://tcg.goodgames.com.au"
-            )
-
-            print(f"[GGAustralia] Title: {title}")
-            print(f"[GGAustralia] Price: {price_str}")
-            print(f"[GGAustralia] Link: {link}")
-
-            if not (title and price_str and link):
-                print("[GGAustralia] Skipping: Missing required info.")
+            name = prod.get("name") or ""
+            base_name = name.split("[")[0].strip()
+            normalized_name = normalize(base_name)
+            if target != normalized_name:
                 continue
-
-            match = re.search(r"\$([\d,]+\.\d{2})", price_str)
-            if not match:
-                print(f"[GGAustralia] Couldn't parse numeric price from: {price_str}")
+            try:
+                price = float(prod.get("price", 0))
+            except Exception:
                 continue
-
-            price = float(match.group(1).replace(",", ""))
-            if not link.startswith("http"):
-                link = "https://tcg.goodgames.com.au" + link
-
-            results.append((price, title, link))
+            if price <= 0:
+                continue
+            link = f"https://tcg.goodgames.com.au/products/{slugify(name)}"
+            results.append((price, name, link))
 
         if not results:
-            print("[GGAustralia] No valid matching products with parsable price.")
-            return 0.0, "No valid match", ""
-
-        cheapest = min(results, key=lambda x: x[0])
-        return cheapest
+            return 0.0, "Out of stock", ""
+        return min(results, key=lambda x: x[0])
 
     except Exception as e:
-        print(f"[GGAustralia scrape error]: {e}")
+        print(f"[GGAustralia fallback error] {e}")
         return 0.0, "Error", ""
-    
-def scrape_jenes(card_name: str, set_code=None, collector_number=None):
+
+    try:
+        soup = BeautifulSoup(page_text, "html.parser")
+        results = []
+        cards = soup.select("div.search-result, div.grid__item")
+        for card in cards:
+            title_tag = card.select_one("a.full-unstyled-link, a.product-card__title, a")
+            price_tag = card.select_one(".price-item, .price, .product-price")
+            if not title_tag or not price_tag:
+                continue
+            title = title_tag.get_text(strip=True)
+            base_title = title.split("[")[0].strip()
+            normalized_title = normalize(base_title)
+            if target != normalized_title:
+                continue
+            price_match = re.search(r"\$([\d.,]+)", price_tag.get_text())
+            if not price_match:
+                continue
+            price = float(price_match.group(1).replace(",", ""))
+            sold_out = bool(card.find(string=re.compile("Sold out", re.I)))
+            if sold_out or price <= 0:
+                continue
+            link = title_tag.get("href") or "https://tcg.goodgames.com.au"
+            if link and not link.startswith("http"):
+                link = urljoin("https://tcg.goodgames.com.au", link)
+            results.append((price, title, link))
+        if not results:
+            return 0.0, "Out of stock", ""
+        return min(results, key=lambda x: x[0])
+    except Exception as e:
+        print(f"[GGAustralia DOM fallback error] {e}")
+        return 0.0, "Error", ""
+
+def scrape_jenes(card_name: str):
     import requests, re
     from bs4 import BeautifulSoup
+    from urllib.parse import quote_plus
 
-    # Build search query with set code if available
-    search_query = card_name
-    if set_code:
-        search_query += f" {set_code}"
-
-    url = f"https://jenesmtg.com.au/search?q={search_query}&options%5Bprefix%5D=last"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    url = f"https://jenesmtg.com.au/search?q={quote_plus(card_name)}&options%5Bprefix%5D=last"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
     try:
         response = requests.get(url, headers=headers, timeout=15)
@@ -528,76 +644,459 @@ def scrape_jenes(card_name: str, set_code=None, collector_number=None):
 
         target = card_name.strip().lower()
         results = []
-        set_matched_results = []
 
-        for card in soup.select("div.card-wrapper"):
-            if card.select_one("span.badge") and "Sold out" in card.get_text():
+        for card in soup.select("div.mtg-card"):
+            # Skip out of stock
+            stock_badge = card.select_one("span.mtg-stock-badge")
+            if not stock_badge or "in-stock" not in stock_badge.get("class", []):
                 continue
 
-            name_tag = card.select_one("a.full-unstyled-link")
+            # Get card name from the anchor title or text
+            name_tag = card.select_one("a.mtg-card-name")
             if not name_tag:
                 continue
 
-            full_name = name_tag.get_text(strip=True)
-            product_name = full_name.split("|")[0].strip().lower()
+            # Title attr is "CardName|Set|Number | Variant" - take just the card name part
+            title_attr = name_tag.get("title", "")
+            card_title = title_attr.split("|")[0].strip() if title_attr else name_tag.get_text(strip=True)
 
-            if product_name != target:
+            if card_title.lower() != target:
                 continue
-
-            set_match = True
-            collector_match = True
-
-            if set_code:
-                set_pattern = re.search(r'\[([^\]]+)\]', full_name)
-                if set_pattern:
-                    card_set = set_pattern.group(1).strip().lower()
-                    set_match = set_code.lower() in card_set or card_set in set_code.lower()
-                else:
-                    set_match = False
-
-            if collector_number:
-                num_pattern = re.search(r'#(\d+)', full_name)
-                if num_pattern:
-                    card_number = num_pattern.group(1)
-                    collector_match = card_number == collector_number
-                else:
-                    collector_match = False
 
             link = name_tag.get("href", "")
             if link and not link.startswith("http"):
                 link = "https://jenesmtg.com.au" + link
+            # Strip tracking params
+            link = link.split("?")[0]
 
-            found_prices = set()
-            for price_tag in card.select("span.price-item"):
-                text = price_tag.get_text(strip=True)
-                match = re.search(r"\$([0-9]+\.[0-9]{2})", text)
-                if match:
-                    found_prices.add(float(match.group(1)))
+            price_tag = card.select_one("span.mtg-card-price")
+            if not price_tag:
+                continue
+            price_text = price_tag.get_text(strip=True)
+            match = re.search(r"\$([0-9]+\.[0-9]{2})", price_text)
+            if not match:
+                continue
 
-            if found_prices:
-                cheapest = min(found_prices)
-                result = (cheapest, full_name, link)
+            price = float(match.group(1))
+            label = title_attr if title_attr else card_title
+            results.append((price, label, link))
 
-                if set_code and collector_number and set_match and collector_match:
-                    set_matched_results.append(result)
-                elif set_code and not collector_number and set_match:
-                    set_matched_results.append(result)
-                elif not set_code and not collector_number:
-                    results.append(result)
-                elif not set_code:
-                    results.append(result)
-
-        all_results = set_matched_results + results
-
-        if not all_results:
+        if not results:
             return (0.0, "Out of stock", "")
 
-        cheapest = min(all_results, key=lambda x: x[0])
-        return cheapest
+        return min(results, key=lambda x: x[0])
 
     except Exception as e:
         print(f"[Jene's scrape error]: {e}")
         return (0.0, "Error", "")
+    
+def scrape_shuffled(card_name: str):
+    import requests, re
+    from bs4 import BeautifulSoup
+    from urllib.parse import quote_plus
+
+    url = f"https://shuffled.com.au/search?page=1&q=%2A{quote_plus(card_name)}%2A"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        target = card_name.strip().lower()
+        results = []
+
+        for card in soup.select("div.productCard__card"):
+            # Get card title from the link text
+            title_tag = card.select_one("p.productCard__title a")
+            if not title_tag:
+                continue
+
+            full_title = title_tag.get_text(strip=True)
+            # Title format: "Abrade (FDN-188) - Foundations"
+            # Extract just the card name (before the first bracket or dash)
+            card_title = re.split(r"[\(\-]", full_title)[0].strip().lower()
+            if card_title != target:
+                continue
+
+            # Build product URL
+            href = title_tag.get("href", "").split("?")[0]
+            link = "https://shuffled.com.au" + href if href.startswith("/") else href
+
+            # Find cheapest available variant from the chip data attributes
+            best_price = None
+            for chip in card.select("li.productChip"):
+                available = chip.get("data-variantavailable", "false") == "true"
+                qty = int(chip.get("data-variantqty", "0") or 0)
+                if not available or qty <= 0:
+                    continue
+                try:
+                    # Price is stored in cents
+                    price_cents = int(chip.get("data-variantprice", "0") or 0)
+                    price = price_cents / 100
+                except (ValueError, TypeError):
+                    continue
+                if price > 0 and (best_price is None or price < best_price):
+                    best_price = price
+
+            if best_price is not None:
+                results.append((best_price, full_title, link))
+
+        if not results:
+            return (0.0, "Out of stock", "")
+
+        return min(results, key=lambda x: x[0])
+
+    except Exception as e:
+        print(f"[Shuffled scrape error]: {e}")
+        return (0.0, "Error", "")
+
+def scrape_kcg(card_name: str):
+    import requests, re
+    from bs4 import BeautifulSoup
+    from urllib.parse import quote_plus
+
+    url = f"https://kastlecardsandgames.com/search?type=product&q={quote_plus(card_name)}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        target = card_name.strip().lower()
+        results = []
+
+        for card in soup.select("product-card"):
+            # Title is in the visually-hidden span inside the product-card__link
+            title_tag = card.select_one("a.product-card__link span.visually-hidden")
+            if not title_tag:
+                # fallback to h3
+                title_tag = card.select_one("h3")
+            if not title_tag:
+                continue
+
+            full_title = title_tag.get_text(strip=True)
+            # Title format: "Sol Ring [Buy-A-Box Promos]" - strip set info in brackets
+            card_title = re.split(r"\[", full_title)[0].strip().lower()
+            if card_title != target:
+                continue
+
+            # Skip sold out cards - badge with "Sold out" text is present
+            sold_out_badge = card.select_one("div.product-badges__badge")
+            if sold_out_badge and "Sold out" in sold_out_badge.get_text():
+                continue
+
+            # Also check for disabled add-to-cart button as a fallback
+            add_btn = card.select_one("button.quick-add__button--add")
+            if add_btn and add_btn.has_attr("disabled"):
+                continue
+
+            # Get product URL from the main link
+            link_tag = card.select_one("a.product-card__link")
+            href = link_tag.get("href", "").split("?")[0] if link_tag else ""
+            link = "https://kastlecardsandgames.com" + href if href.startswith("/") else href
+
+            # Price is in span.price
+            price_tag = card.select_one("span.price")
+            if not price_tag:
+                continue
+            price_text = price_tag.get_text(strip=True)
+            match = re.search(r"\$([0-9]+\.[0-9]{2})", price_text)
+            if not match:
+                continue
+
+            price = float(match.group(1))
+            results.append((price, full_title, link))
+
+        if not results:
+            return (0.0, "Out of stock", "")
+
+        return min(results, key=lambda x: x[0])
+
+    except Exception as e:
+        print(f"[KCG scrape error]: {e}")
+        return (0.0, "Error", "")
+
+def scrape_hareruyamtg(card_name: str, language_filter: str = "EN") -> tuple:
+    """
+    Search Hareruya for an MTG single and return the cheapest in-stock match as
+    (price_aud, label, url, price_jpy).
+
+    First tries NM stock from the search API. If NM is out of stock, fetches the
+    product detail page and scrapes the 'tableHere' div for SP/MP/HP conditions.
+
+    language_filter:
+        "EN"    -> English only
+        "EN>JP" -> English first; if no EN in stock falls back to cheapest JP
+        "JP"    -> Japanese only
+        "Other" -> all languages except EN and JP
+        "All"   -> no language filter
+
+    Falls back to (0.0, reason, "", 0) on any failure.
+    """
+    import requests, re
+    from bs4 import BeautifulSoup
+
+    HARERUYA_USER_TOKEN = "cc567a4aa1774b15fc1d2a4d94e5bc01fbb701c3f4c8e28085ba8a4661ec3867"
+    JPY_TO_AUD = 1 / 113.49
+
+    HEADERS = {
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.8",
+        "Referer": "https://www.hareruyamtg.com/en/products/search",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/145.0.0.0 Safari/537.36"
+        ),
+        "X-Requested-With": "XMLHttpRequest",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+    }
+
+    PAGE_HEADERS = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/145.0.0.0 Safari/537.36"
+        ),
+    }
+
+    def normalize(text):
+        text = text.lower()
+        text = re.sub(r"[\u2018\u2019\u0027\":,?!()\[\]{}]", "", text)
+        text = re.sub(r"[^a-z0-9\s\-]", "", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    def scrape_conditions_from_page(product_id: str, base_label: str, product_url: str, lang_code: str = "EN") -> list:
+        """
+        Fetch the product detail page and parse the language-specific priceTable
+        div for all in-stock conditions. Returns list of entry tuples.
+
+        In-stock rows have an addCart button; out-of-stock rows have a notifyme button.
+        The correct language table is #priceTable-EN or #priceTable-JP.
+        """
+        try:
+            r = requests.get(product_url, headers=PAGE_HEADERS, timeout=20)
+            r.raise_for_status()
+        except Exception as e:
+            print(f"[Hareruya] Detail page fetch error for {product_id}: {e}")
+            return []
+
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # Target the language-specific price table
+        table_id = f"priceTable-{lang_code}"
+        price_table = soup.select_one(f"#{table_id}")
+        if not price_table:
+            print(f"[Hareruya] #{table_id} not found on detail page for product {product_id}")
+            return []
+
+        entries = []
+        for row in price_table.select("div.row.not-first"):
+            # Skip the header row (contains "Condition" link text)
+            if row.select_one("a[href='/en/user_data/card_condition']"):
+                continue
+
+            # Only process rows that have an addCart button (in stock)
+            cart_btn = row.select_one("button.addCart.detail")
+            if not cart_btn:
+                continue
+
+            # Condition: strong tag inside the productClassChange link
+            cond_tag = row.select_one("a.productClassChange strong")
+            if not cond_tag:
+                continue
+            cond = cond_tag.get_text(strip=True).upper()
+
+            # Price: col-xs-3 contains e.g. "1,200 JPY"
+            price_tag = row.select_one("div.col-xs-3")
+            if not price_tag:
+                continue
+            price_match = re.search(r"[\d,]+", price_tag.get_text(strip=True))
+            if not price_match:
+                continue
+            try:
+                price_jpy = float(price_match.group().replace(",", ""))
+            except ValueError:
+                continue
+            if price_jpy <= 0:
+                continue
+
+            # Stock: col-xs-2 contains the quantity number
+            stock_tag = row.select_one("div.col-xs-2")
+            if not stock_tag:
+                continue
+            try:
+                stock = int(stock_tag.get_text(strip=True))
+            except ValueError:
+                continue
+            if stock <= 0:
+                continue
+
+            price_aud = round(price_jpy * JPY_TO_AUD, 2)
+            label = f"{base_label} [{cond}]"
+            entries.append((price_aud, label, product_url, int(price_jpy)))
+
+        return entries
+
+    base_url = "https://www.hareruyamtg.com/en/products/search/unisearch_api"
+    params = {
+        "kw": card_name,
+        "fq.price": "1~*",
+        "rows": 60,
+        "page": 1,
+        "user": HARERUYA_USER_TOKEN,
+    }
+
+    # Fetch all pages from search API
+    docs = []
+    page = 1
+    while True:
+        params["page"] = page
+        try:
+            r = requests.get(base_url, params=params, headers=HEADERS, timeout=20)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            print(f"[Hareruya] Request error: {e}")
+            return (0.0, "Error", "", 0)
+        try:
+            data = r.json()
+        except ValueError as e:
+            print(f"[Hareruya] JSON parse error: {e}")
+            return (0.0, "Error", "", 0)
+
+        page_docs = data.get("response", {}).get("docs", [])
+        if not page_docs:
+            break
+        docs.extend(page_docs)
+        total = int(data.get("response", {}).get("numFound", 0))
+        if len(docs) >= total:
+            break
+        page += 1
+
+    if not docs:
+        return (0.0, "Not found", "", 0)
+
+    target = normalize(card_name)
+
+    # Buckets for NM in-stock entries (from API) and OOS product pages to fall back to
+    en_candidates = []
+    jp_candidates = []
+    other_candidates = []
+
+    # Track out-of-stock NM items so we can scrape their detail pages for SP/MP/HP
+    oos_fallback_en = []   # (product_id, base_label, product_url)
+    oos_fallback_jp = []
+    oos_fallback_other = []
+
+    for item in docs:
+        lang_str = str(item.get("language", ""))
+
+        item_name = item.get("card_name") or ""
+        if normalize(item_name) != target:
+            continue
+
+        # Skip foils and promo/special treatments
+        if str(item.get("foil_flg", "0")) == "1":
+            continue
+        prod_name = (item.get("product_name_en") or item.get("product_name") or "").lower()
+        if any(x in prod_name for x in ("foil", "promo", "prerelease", "serial", "galaxy", "retro")):
+            continue
+
+        try:
+            stock = int(item.get("stock", 0))
+        except (TypeError, ValueError):
+            stock = 0
+
+        try:
+            price_jpy = float(item.get("price", 0))
+        except (TypeError, ValueError):
+            price_jpy = 0.0
+
+        product_id = item.get("product", "")
+        product_url = (
+            f"https://www.hareruyamtg.com/en/products/detail/{product_id}?lang=EN"
+            if product_id else "https://www.hareruyamtg.com/en/products/search"
+        )
+        label = (item.get("product_name_en") or item.get("product_name") or item_name).strip()
+
+        print(f"[Hareruya DEBUG] product={product_id!r} lang={lang_str!r} stock={stock} price={price_jpy} label={label!r} keys={sorted(item.keys())}")
+
+        if stock > 0 and price_jpy > 0:
+            # NM in stock — add directly
+            price_aud = round(price_jpy * JPY_TO_AUD, 2)
+            entry = (price_aud, label, product_url, int(price_jpy))
+            if lang_str == "2":
+                en_candidates.append(entry)
+            elif lang_str == "1":
+                jp_candidates.append(entry)
+            else:
+                other_candidates.append(entry)
+        else:
+            # NM out of stock — record for fallback detail-page scrape
+            # lang_str "2"=EN, "1"=JP; map to the priceTable lang code
+            if product_id:
+                page_lang = "EN" if lang_str == "2" else "JP" if lang_str == "1" else "EN"
+                fb = (product_id, label, product_url, page_lang)
+                if lang_str == "2":
+                    oos_fallback_en.append(fb)
+                elif lang_str == "1":
+                    oos_fallback_jp.append(fb)
+                else:
+                    oos_fallback_other.append(fb)
+
+    def resolve(nm_list, oos_list):
+        """Return nm_list if non-empty, otherwise scrape detail pages from oos_list."""
+        if nm_list:
+            return nm_list
+        results = []
+        for product_id, base_label, product_url, page_lang in oos_list:
+            results.extend(scrape_conditions_from_page(product_id, base_label, product_url, page_lang))
+        return results
+
+    if language_filter == "EN":
+        candidates = resolve(en_candidates, oos_fallback_en)
+        if not candidates:
+            return (0.0, "Out of stock", "", 0)
+        return min(candidates, key=lambda x: x[0])
+
+    elif language_filter == "EN>JP":
+        candidates = resolve(en_candidates, oos_fallback_en)
+        if candidates:
+            return min(candidates, key=lambda x: x[0])
+        jp = resolve(jp_candidates, oos_fallback_jp)
+        if jp:
+            best = min(jp, key=lambda x: x[0])
+            return (best[0], f"[JP] {best[1]}", best[2], best[3])
+        return (0.0, "Out of stock", "", 0)
+
+    elif language_filter == "JP":
+        candidates = resolve(jp_candidates, oos_fallback_jp)
+        if not candidates:
+            return (0.0, "Out of stock", "", 0)
+        return min(candidates, key=lambda x: x[0])
+
+    elif language_filter == "Other":
+        candidates = resolve(other_candidates, oos_fallback_other)
+        if not candidates:
+            return (0.0, "Out of stock", "", 0)
+        return min(candidates, key=lambda x: x[0])
+
+    else:  # "All"
+        en = resolve(en_candidates, oos_fallback_en)
+        jp = resolve(jp_candidates, oos_fallback_jp)
+        other = resolve(other_candidates, oos_fallback_other)
+        all_candidates = en + jp + other
+        if not all_candidates:
+            return (0.0, "Out of stock", "", 0)
+        return min(all_candidates, key=lambda x: x[0])
+
 
 def parse_decklist_from_input(text):
     cards = []
@@ -605,57 +1104,13 @@ def parse_decklist_from_input(text):
         line = line.strip()
         if not line:
             continue
-
-        # Split line by spaces to get sections
-        parts = line.split()
-
-        if len(parts) >= 2:
-            # Check if first part is quantity (number with optional 'x')
-            if re.match(r'\d+x?', parts[0], re.IGNORECASE):
-                # New format: "1 Arcane Signet (fic) 334"
-                remaining_parts = parts[1:]
-                card_name_parts = []
-                set_code = None
-                collector_number = None
-
-                for i, part in enumerate(remaining_parts):
-                    # Check for set code in parentheses
-                    if part.startswith('(') and part.endswith(')'):
-                        set_code = part[1:-1]  # Remove parentheses
-                        # Check if next part is collector number
-                        if i + 1 < len(remaining_parts) and remaining_parts[i + 1].isdigit():
-                            collector_number = remaining_parts[i + 1]
-                        break
-                    # Check for standalone collector number
-                    elif part.isdigit() and not card_name_parts:
-                        # If we hit a number with no card name yet, skip
-                        continue
-                    elif part.isdigit():
-                        # This is likely a collector number
-                        collector_number = part
-                        break
-                    else:
-                        card_name_parts.append(part)
-
-                if card_name_parts:
-                    card_name = ' '.join(card_name_parts)
-                    cards.append((card_name, set_code, collector_number))
-            else:
-                # Fallback to old format parsing
-                match = re.match(r'(\d+x?\s*)?(.*)', line, re.IGNORECASE)
-                if match:
-                    card_name = match.group(2).strip()
-                    if card_name:
-                        cards.append((card_name, None, None))
-        else:
-            # Single word or old format fallback
-            match = re.match(r'(\d+x?\s*)?(.*)', line, re.IGNORECASE)
-            if match:
-                card_name = match.group(2).strip()
-                if card_name:
-                    cards.append((card_name, None, None))
-
+        match = re.match(r'(\d+x?\s*)?(.*)', line, re.IGNORECASE)
+        if match:
+            card_name = match.group(2).strip()
+            if card_name:
+                cards.append(card_name) 
     return cards
+
 
 CACHE_FILE = os.path.join(os.path.dirname(__file__), "deck_cache.json")
 
@@ -673,23 +1128,29 @@ def save_deck_cache(cache):
         json.dump(cache, f, indent=2)
 
 SCRAPER_CONFIG = {
-    "MoonMTG": {"enabled": True, "func": scrape_moonmtg}, 
-    "MTGMate": {"enabled": True, "func": fetch_mtgmate_price},
-    "CardHub": {"enabled": True, "func": scrape_cardhub},
-    "JenesMTG": {"enabled": True, "func": scrape_jenes},
-    "GGAustralia": {"enabled": True, "func": scrape_ggadelaide},
-    "GGModbury": {"enabled": True, "func": scrape_ggmodbury},
-    "GGAdelaide": {"enabled": True, "func": scrape_ggadelaide}, 
+    "CardHub":    {"enabled": True, "func": scrape_cardhub},
+    "GamesPortal":{"enabled": True, "func": scrape_gamesportal},
+    "GGAdelaide": {"enabled": True, "func": scrape_ggadelaide},
+    "GGAustralia":{"enabled": True, "func": scrape_ggaustralia},
+    "GGModbury":  {"enabled": True, "func": scrape_ggmodbury},
+    "Hareruya":   {"enabled": True, "func": scrape_hareruyamtg},
+    "JenesMTG":   {"enabled": True, "func": scrape_jenes},
+    "KCG":        {"enabled": True, "func": scrape_kcg},
+    "MoonMTG":    {"enabled": True, "func": scrape_moonmtg},
+    "MTGMate":    {"enabled": True, "func": fetch_mtgmate_price},
+    "Shuffled":   {"enabled": True, "func": scrape_shuffled},
 }
 
 SOURCE_TO_COLUMN = {
     "MoonMTG": "Moon",
     "MTGMate": "MTGMate",
     "CardHub": "CardHub",
+    "GamesPortal": "GamesPortal",
     "JenesMTG": "Jenes",
     "GGAustralia": "GGTCG",
     "GGModbury": "GGModbury",
     "GGAdelaide": "GoodGames",
+    "Hareruya": "Hareruya",
 }
 
 from tkinterdnd2 import TkinterDnD, DND_FILES
@@ -713,17 +1174,67 @@ import threading, webbrowser, os, datetime, time
 from concurrent.futures import ThreadPoolExecutor
 from openpyxl import Workbook
 
+# ── Card Kingdom price cache ──────────────────────────────────────────────────
+_ck_price_cache = {}   # card_name_lower -> cheapest NM retail USD
+_ck_cache_ready = False
+
+def _load_ck_prices():
+    global _ck_price_cache, _ck_cache_ready
+    import requests
+    try:
+        r = requests.get(
+            "https://api.cardkingdom.com/api/v2/pricelist",
+            headers={"User-Agent": "MTGPriceChecker/1.0 (contact: kadenschaedel@gmail.com)"},
+            timeout=30
+        )
+        r.raise_for_status()
+        data = r.json()
+        cache = {}
+        for item in data.get("data", []):
+            if str(item.get("is_foil", "0")) == "1":
+                continue
+            name = item.get("name", "").strip().lower()
+            try:
+                price = float(item.get("price_retail", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if price <= 0:
+                continue
+            # Keep cheapest non-foil NM price per card name
+            if name not in cache or price < cache[name]:
+                cache[name] = price
+        _ck_price_cache = cache
+        _ck_cache_ready = True
+        print(f"[CK] Price list loaded: {len(cache)} cards")
+    except Exception as e:
+        print(f"[CK] Failed to load price list: {e}")
+        _ck_cache_ready = True  # mark ready so UI doesn't wait forever
+
+def get_ck_price(card_name: str):
+    """Return cheapest CK NM non-foil USD price, or None if not found."""
+    return _ck_price_cache.get(card_name.strip().lower())
+
 class MTGScraperGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("MTG Price Checker")
+        self.root.geometry("1500x750")
+        self.root.resizable(False, False)
         self.card_urls = {}
         self.stop_flag = False
+        self._results_cache = {}  # card_name -> (display_data, cheapest, url, results)
+        self.last_selected_row = None
         headers = {"user-agent": "my-mtg-scraper/1.0 (contact: kadenschaedel@gmail.com)"}
         self.http_client = httpx.Client(headers=headers)
 
+        # ── Toolbar ───────────────────────────────────────────────────
         toolbar = tk.Frame(root, bd=1, relief="raised")
         toolbar.pack(side="top", fill="x")
+
+        # Force treeview text to black by default
+        style = ttk.Style()
+        style.configure("Treeview", foreground="black", background="white", fieldbackground="white")
+        style.map("Treeview", foreground=[("selected", "white")], background=[("selected", "#0078d7")])
 
         self.quick_menu_button = tk.Menubutton(toolbar, text="Open Sources", relief="raised")
         self.quick_menu = tk.Menu(self.quick_menu_button, tearoff=0)
@@ -742,158 +1253,156 @@ class MTGScraperGUI:
         for source in SCRAPER_CONFIG:
             var = tk.BooleanVar(value=SCRAPER_CONFIG[source]['enabled'])
             self.source_vars[source] = var
-            self.toggles_menu.add_checkbutton(label=source, variable=var, command=self.recalculate_cheapest_prices)
-
-        self.include_sideboard = tk.BooleanVar(value=False)
-        self.include_maybeboard = tk.BooleanVar(value=False)
-        self.use_set_info = tk.BooleanVar(value=True)
-        self.use_set_info.trace_add('write', lambda *args: self.rebuild_table())
-        self.toggles_menu.add_separator()
-        self.toggles_menu.add_checkbutton(label="Include Sideboard", variable=self.include_sideboard)
-        self.toggles_menu.add_checkbutton(label="Include Maybeboard", variable=self.include_maybeboard)
-
+            self.toggles_menu.add_checkbutton(label=source, variable=var, command=self.on_source_toggle)
         self.toggles_button.config(menu=self.toggles_menu)
         self.toggles_button.pack(side="left", padx=5, pady=2)
 
-        input_frame = tk.Frame(root)
-        input_frame.pack(fill='x', padx=5, pady=5)
+        # ── Main area: top panel (left+right) + results table ─────────
+        # Top panel holds left (deck input) and right (settings/missing)
+        top_panel = tk.Frame(root)
+        top_panel.pack(side="top", fill="x", padx=6, pady=(4, 0))
 
-        missing_frame = tk.Frame(input_frame)
-        missing_frame.pack(side='left', padx=5, pady=5, anchor='n')
-        tk.Label(missing_frame, text="Missing Cards").pack(anchor='nw')
-        self.missing_listbox = tk.Listbox(missing_frame, height=12, width=25)
-        self.missing_listbox.pack(side='left', fill='y')
-        missing_scroll = ttk.Scrollbar(missing_frame, orient='vertical', command=self.missing_listbox.yview)
-        missing_scroll.pack(side='right', fill='y')
-        self.missing_listbox.config(yscrollcommand=missing_scroll.set)
+        # ── LEFT: Deck Input ──────────────────────────────────────────
+        deck_frame = tk.LabelFrame(top_panel, text="Deck Input")
+        deck_frame.pack(side="left", fill="both", expand=True, padx=(0, 4), pady=2)
 
-        deck_frame = tk.LabelFrame(input_frame, text="Deck Input")
-        deck_frame.pack(side='left', fill='both', expand=True, padx=5, pady=5)
-        
         url_frame = tk.Frame(deck_frame)
-        url_frame.pack(fill='x', padx=2, pady=2)
+        url_frame.pack(fill='x', padx=4, pady=(4, 2))
 
-        self.url_entry = tk.Entry(url_frame, fg="grey", width=35)
+        self.url_entry = tk.Entry(url_frame, fg="grey", width=32)
         self.url_entry.insert(0, "Paste a deck link")
-        self.url_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.url_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
         self.url_entry.bind("<FocusIn>", self.clear_placeholder)
         self.url_entry.bind("<FocusOut>", self.add_placeholder)
 
         self.fetch_button = tk.Button(url_frame, text="Fetch", command=self.fetch_deck_from_url)
         self.fetch_button.pack(side="left", padx=2)
 
-        self.last_selected_row = None
-
-        self.save_deck_button = tk.Button(url_frame, text="Save", command=self.save_deck)
+        self.save_deck_button = tk.Button(url_frame, text="Save Deck", command=self.save_deck)
         self.save_deck_button.pack(side="left", padx=2)
 
-        self.deck_var = tk.StringVar()
-        self.deck_dropdown = ttk.Combobox(url_frame, textvariable=self.deck_var, state="readonly", width=25)
-        self.deck_dropdown.pack(side="left", padx=2)
-        self.deck_dropdown.bind("<<ComboboxSelected>>", self.load_saved_deck)
+        saved_frame = tk.Frame(deck_frame)
+        saved_frame.pack(fill='x', padx=4, pady=2)
 
+        self.deck_var = tk.StringVar()
+        self.deck_dropdown = ttk.Combobox(saved_frame, textvariable=self.deck_var, state="readonly", width=30)
+        self.deck_dropdown.pack(side="left", padx=(0, 4), fill="x", expand=True)
+        self.deck_dropdown.bind("<<ComboboxSelected>>", self.load_saved_deck)
         self.deck_dropdown.set("Select saved deck")
         self.deck_dropdown.configure(foreground="grey")
         self.deck_dropdown.bind("<FocusIn>", self.clear_dropdown_placeholder)
         self.deck_dropdown.bind("<FocusOut>", self.add_dropdown_placeholder)
 
-        self.delete_deck_button = tk.Button(url_frame, text="Delete", command=self.delete_deck)
+        self.delete_deck_button = tk.Button(saved_frame, text="Delete", command=self.delete_deck)
         self.delete_deck_button.pack(side="left", padx=2)
-
-        self.set_search_button = tk.Checkbutton(url_frame, text="Use Set Code/Number", variable=self.use_set_info)
-        self.set_search_button.pack(side="left", padx=5)
 
         self.deck_cache = load_deck_cache()
         self.refresh_deck_dropdown()
 
-        self.text_input = tk.Text(deck_frame, height=15, width=60, wrap='word', relief="sunken", borderwidth=2)
-        self.text_input.pack(pady=2, padx=2, fill='both', expand=True)
-
+        self.text_input = tk.Text(deck_frame, height=12, width=50, wrap='word', relief="sunken", borderwidth=2)
+        self.text_input.pack(pady=(2, 4), padx=4, fill='both', expand=True)
         self.text_input.drop_target_register(DND_FILES)
         self.text_input.dnd_bind("<<Drop>>", self.handle_file_drop)
 
-        control_frame = tk.Frame(root)
-        control_frame.pack(fill="x", padx=5, pady=5)
+        btn_row = tk.Frame(deck_frame)
+        btn_row.pack(fill="x", padx=4, pady=(0, 4))
 
-        self.button = tk.Button(control_frame, text='Search Prices', command=self.toggle_search)
-        self.button.pack(side="left", padx=5, pady=2)
+        self.button = tk.Button(btn_row, text='Search Prices', width=14, command=self.toggle_search, bg="#4CAF50", fg="white", font=("Helvetica", 10, "bold"))
+        self.button.pack(side="left", padx=(0, 4))
 
-        self.load_button = tk.Button(control_frame, text='Load File', command=self.load_file)
-        self.load_button.pack(side="left", padx=5, pady=2)
+        self.load_button = tk.Button(btn_row, text='Load File', command=self.load_file)
+        self.load_button.pack(side="left", padx=2)
 
-        self.save_button = tk.Button(control_frame, text='Save to CSV', command=self.save_to_excel)
-        self.save_button.pack(side="left", padx=5, pady=2)
+        self.save_button = tk.Button(btn_row, text='Save to Excel', command=self.save_to_excel)
+        self.save_button.pack(side="left", padx=2)
 
-        self.tree_frame = tk.Frame(root)
-        self.tree_frame.pack(padx=5, pady=5, fill='both', expand=True)
+        # ── RIGHT: Settings + Missing Cards ───────────────────────────
+        right_panel = tk.Frame(top_panel, width=210)
+        right_panel.pack(side="left", fill="y", padx=(0, 0), pady=2)
+        right_panel.pack_propagate(False)
 
-        self.tree = None
-        self.tree_scrollbar = None
-        self.build_tree()
+        settings_frame = tk.LabelFrame(right_panel, text="Settings")
+        settings_frame.pack(fill="x", padx=2, pady=(0, 4))
 
+        # Hareruya language
+        lang_row = tk.Frame(settings_frame)
+        lang_row.pack(fill="x", padx=6, pady=(6, 2))
+        tk.Label(lang_row, text="Hareruya Language:", anchor="w").pack(side="left")
+        self.hareruya_lang_var = tk.StringVar(value="EN")
+        self.hareruya_lang_dropdown = ttk.Combobox(
+            lang_row,
+            textvariable=self.hareruya_lang_var,
+            values=["EN", "EN>JP", "JP", "Other", "All"],
+            state="readonly",
+            width=7
+        )
+        self.hareruya_lang_dropdown.pack(side="left", padx=(4, 0))
+
+        # Sideboard / Maybeboard toggles
+        self.include_sideboard = tk.BooleanVar(value=False)
+        self.include_maybeboard = tk.BooleanVar(value=False)
+        tk.Checkbutton(settings_frame, text="Include Sideboard", variable=self.include_sideboard).pack(anchor="w", padx=6, pady=1)
+        tk.Checkbutton(settings_frame, text="Include Maybeboard", variable=self.include_maybeboard).pack(anchor="w", padx=6, pady=(1, 6))
+
+        missing_frame = tk.LabelFrame(right_panel, text="Missing Cards")
+        missing_frame.pack(fill="both", expand=True, padx=2, pady=0)
+
+        self.missing_listbox = tk.Listbox(missing_frame, height=8, width=24)
+        self.missing_listbox.pack(side='left', fill='both', expand=True, padx=(4, 0), pady=4)
+        missing_scroll = ttk.Scrollbar(missing_frame, orient='vertical', command=self.missing_listbox.yview)
+        missing_scroll.pack(side='right', fill='y', pady=4, padx=(0, 4))
+        self.missing_listbox.config(yscrollcommand=missing_scroll.set)
+
+        # ── Results table ─────────────────────────────────────────────
+        table_frame = tk.Frame(root)
+        table_frame.pack(side="top", fill='both', expand=True, padx=6, pady=(4, 0))
+
+        self.tree = ttk.Treeview(table_frame, columns=('Card',) + tuple(SCRAPER_CONFIG.keys()) + ('Cheapest', 'CK%'), show='headings')
+        for col in self.tree['columns']:
+            self.tree.heading(col, text=col, command=lambda c=col: self.sort_treeview(c, False))
+            self.tree.column(col, width=100)
+        self.tree.column('Card', width=160)
+        self.tree.column('CK%', width=70)
+
+        # Configure CK% colour tags
+        self._ck_tag_cache = {}
         self.context_menu = tk.Menu(self.tree, tearoff=0)
-
         for source in SCRAPER_CONFIG.keys():
             self.context_menu.add_command(
                 label=f"Open from {source}",
                 command=lambda s=source: self.open_from_source(s)
             )
 
-        self.tree.bind('<ButtonRelease-1>', self.on_click)
-
-        self.progress_label = tk.Label(root, text='')
-        self.progress_label.pack(pady=2)
-        self.total_label = tk.Label(root, text='Total: AU $0.00', font=('Helvetica', 12, 'bold'))
-        self.total_label.pack(pady=5)
-
-        self.tree.bind("<Button-3>", self.show_context_menu) 
-
-        bottom_frame = tk.Frame(root)
-        bottom_frame.pack(side="bottom", fill="x", padx=5, pady=5)
-        self.open_all_button = tk.Button(bottom_frame, text='Open All Cheapest', command=self.open_all_cheapest)
-        self.open_all_button.pack(side="right", padx=5, pady=2)
-
-    def build_tree(self):
-        if self.tree:
-            self.tree.destroy()
-        if self.tree_scrollbar:
-            self.tree_scrollbar.destroy()
-
-        if self.use_set_info.get():
-            columns = ('Card',) + tuple(SCRAPER_CONFIG.keys())
-        else:
-            columns = ('Card',) + tuple(SCRAPER_CONFIG.keys()) + ('Cheapest',)
-
-        self.tree = ttk.Treeview(self.tree_frame, columns=columns, show='headings')
-        for col in self.tree['columns']:
-            self.tree.heading(col, text=col, command=lambda c=col: self.sort_treeview(c, False))
-            self.tree.column(col, width=100)
-
-        self.tree_scrollbar = ttk.Scrollbar(self.tree_frame, orient='vertical', command=self.tree.yview)
-        self.tree.configure(yscrollcommand=self.tree_scrollbar.set)
-        self.tree.pack(side='left', fill='both', expand=True)
-        self.tree_scrollbar.pack(side='right', fill='y')
+        h_scroll = ttk.Scrollbar(table_frame, orient='horizontal', command=self.tree.xview)
+        v_scroll = ttk.Scrollbar(table_frame, orient='vertical', command=self.tree.yview)
+        self.tree.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
+        self.tree.grid(row=0, column=0, sticky='nsew')
+        v_scroll.grid(row=0, column=1, sticky='ns')
+        h_scroll.grid(row=1, column=0, sticky='ew')
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
 
         self.tree.bind('<ButtonRelease-1>', self.on_click)
         self.tree.bind("<Button-3>", self.show_context_menu)
 
-    def rebuild_table(self):
-        saved_data = {}
-        for row_id in self.tree.get_children():
-            values = self.tree.item(row_id)['values']
-            card_name = values[0]
-            saved_data[card_name] = values
+        # Apply initial column visibility
+        self.update_visible_columns()
 
-        self.build_tree()
+        # Load CK prices in background
+        threading.Thread(target=_load_ck_prices, daemon=True).start()
 
-        if saved_data:
-            for card_name, old_values in saved_data.items():
-                if self.use_set_info.get():
-                    new_row = old_values[:len(SCRAPER_CONFIG) + 1]
-                else:
-                    new_row = old_values
-                self.tree.insert('', 'end', values=tuple(new_row))
-            self.recalculate_cheapest_prices()
+        # ── Status bar ────────────────────────────────────────────────
+        status_bar = tk.Frame(root, bd=1, relief="sunken")
+        status_bar.pack(side="bottom", fill="x", padx=6, pady=4)
+
+        self.progress_label = tk.Label(status_bar, text='Ready', anchor="w")
+        self.progress_label.pack(side="left", padx=8)
+
+        self.total_label = tk.Label(status_bar, text='Total: AU $0.00', font=('Helvetica', 11, 'bold'), anchor="center")
+        self.total_label.pack(side="left", expand=True)
+
+        self.open_all_button = tk.Button(status_bar, text='Open All Cheapest', command=self.open_all_cheapest)
+        self.open_all_button.pack(side="right", padx=8, pady=2)
 
     def show_context_menu(self, event):
         selected = self.tree.identify_row(event.y)
@@ -992,20 +1501,7 @@ class MTGScraperGUI:
                     continue
                 filtered.append(c)
 
-            # Build deck text with set code and collector number if checkbox is enabled
-            deck_lines = []
-            for c in filtered:
-                if self.use_set_info.get() and (c.extension or c.number):
-                    # Format: "1 Card Name (SET) 123"
-                    line = f"{c.quantity} {c.name}"
-                    if c.extension:
-                        line += f" ({c.extension})"
-                    if c.number:
-                        line += f" {c.number}"
-                    deck_lines.append(line)
-                else:
-                    deck_lines.append(f"{c.quantity} {c.name}")
-            deck_text = "\n".join(deck_lines)
+            deck_text = "\n".join([f"{c.quantity} {c.name}" for c in filtered])
 
             self.text_input.delete('1.0', tk.END)
             self.text_input.insert(tk.END, deck_text)
@@ -1024,6 +1520,20 @@ class MTGScraperGUI:
                 self.text_input.delete('1.0', tk.END)
                 self.text_input.insert(tk.END, f.read())
 
+    def update_visible_columns(self):
+        """Show only enabled source columns plus Card and Cheapest."""
+        visible = ['Card']
+        for source in SCRAPER_CONFIG:
+            if self.source_vars[source].get():
+                visible.append(source)
+        visible.append('Cheapest')
+        visible.append('CK%')
+        self.tree['displaycolumns'] = visible
+
+    def on_source_toggle(self):
+        self.update_visible_columns()
+        self.recalculate_cheapest_prices()
+
     def recalculate_cheapest_prices(self):
         total = 0.0
         missing_cards = []
@@ -1036,11 +1546,12 @@ class MTGScraperGUI:
             for source in SCRAPER_CONFIG:
                 price_str = self.card_urls.get(card_name, {}).get('Prices', {}).get(source, "--")
                 try:
-                    price = float(price_str)
+                    # Handle "1.32 (¥150)" format from Hareruya
+                    price = float(str(price_str).split()[0])
                 except:
                     price = 0.0
                 if self.source_vars[source].get():
-                    new_row.append(f"{price:.2f}")
+                    new_row.append(price_str if source == "Hareruya" and price > 0 else f"{price:.2f}" if price > 0 else "--")
                     if 0 < price < cheapest_price:
                         cheapest_price = price
                         cheapest_url = self.card_urls.get(card_name, {}).get('URLs', {}).get(source, "")
@@ -1049,7 +1560,16 @@ class MTGScraperGUI:
             if cheapest_price == float('inf'):
                 cheapest_price = 0.0
             new_row.append(f"{cheapest_price:.2f}")
+            # Recalculate CK% with updated cheapest
+            ck_usd = get_ck_price(str(card_name))
+            if ck_usd and cheapest_price > 0:
+                ratio = ck_usd / cheapest_price
+                new_row.append(f"{ratio*100:.0f}%")
+            else:
+                new_row.append("--")
             self.tree.item(row_id, values=tuple(new_row))
+            if ck_usd and cheapest_price > 0:
+                self._apply_ck_tag(row_id, ratio)
             self.card_urls[card_name]['Cheapest'] = cheapest_url
             total += cheapest_price
             if cheapest_price == 0.0:
@@ -1059,9 +1579,33 @@ class MTGScraperGUI:
         for card in sorted(set(missing_cards)):
             self.missing_listbox.insert(tk.END, card)
 
+    def _apply_ck_tag(self, iid, ratio):
+        """Colour the entire row background based on CK ratio.
+        Green = cheaper than CK, red = more expensive, white = same price."""
+        clamped = max(0.25, min(2.5, ratio))
+        if ratio >= 1.0:
+            intensity = min(1.0, (clamped - 1.0) / 1.5)
+            r = int(255 - intensity * 120)
+            g = 255
+            b = int(255 - intensity * 120)
+        else:
+            intensity = min(1.0, (1.0 - clamped) / 0.75)
+            r = 255
+            g = int(255 - intensity * 120)
+            b = int(255 - intensity * 120)
+        colour = f"#{r:02x}{g:02x}{b:02x}"
+        tag = f"ck_{colour}"
+        if tag not in self._ck_tag_cache:
+            self.tree.tag_configure(tag, background=colour, foreground="black")
+            self._ck_tag_cache[tag] = True
+        existing = [t for t in list(self.tree.item(iid, 'tags') or []) if not t.startswith('ck_')]
+        existing.append(tag)
+        self.tree.item(iid, tags=existing)
+
     def toggle_search(self):
         if self.button['text'] == 'Search Prices':
             self.button.config(text='Stop')
+            self.hareruya_lang_dropdown.config(state='disabled')
             self.stop_flag = False
             threading.Thread(target=self.check_prices, daemon=True).start()
         else:
@@ -1075,24 +1619,38 @@ class MTGScraperGUI:
                 self.text_input.delete('1.0', tk.END)
                 self.text_input.insert(tk.END, f.read())
 
-    def fetch_card_prices_parallel(self, card, set_code=None, collector_number=None):
+    def fetch_card_prices_parallel(self, card):
         enabled_sources = {name: cfg['func'] for name, cfg in SCRAPER_CONFIG.items() if self.source_vars[name].get()}
-        if not self.use_set_info.get():
-            set_code = None
-            collector_number = None
+        hareruya_lang = self.hareruya_lang_var.get()
+        futures = {}
         with ThreadPoolExecutor(max_workers=len(enabled_sources)) as executor:
-            futures = {name: executor.submit(func, card, set_code, collector_number) for name, func in enabled_sources.items()}
+            for name, func in enabled_sources.items():
+                if name == "eBay":
+                   continue
+                if name == "Hareruya":
+                    futures[name] = executor.submit(func, card, hareruya_lang)
+                else:
+                    futures[name] = executor.submit(func, card)
+
         results = {}
         for name, future in futures.items():
             try:
                 result = future.result()
-                if isinstance(result, tuple) and len(result) == 3:
-                    results[name] = result
+                if isinstance(result, tuple) and len(result) >= 3:
+                    # Normalise to 3-tuple for rest of app; store full result separately
+                    results[name] = result[:3]
+                    if name == "Hareruya" and len(result) == 4:
+                        results[f"{name}_jpy"] = result[3]
                 else:
                     results[name] = (0.0, "Invalid result", "")
             except Exception as e:
                 print(f"[{name} scrape error]: {e}")
                 results[name] = (0.0, "Error", "")
+
+        if "eBay" in enabled_sources:
+            time.sleep(0.75)
+            results["eBay"] = SCRAPER_CONFIG["eBay"]["func"](card)
+
         all_sources = SCRAPER_CONFIG.keys()
         prices = []
         urls = []
@@ -1103,12 +1661,17 @@ class MTGScraperGUI:
                 price, _, url = result
                 prices.append((name, price))
                 urls.append((name, url))
-                display_data[name] = f"{price:.2f}"
+                if name == "Hareruya" and f"{name}_jpy" in results:
+                    display_data[name] = f"{price:.2f} (¥{results[name+'_jpy']})"
+                else:
+                    display_data[name] = f"{price:.2f}"
             else:
                 display_data[name] = "--"
+
         cheapest_price = min((p for _, p in prices if p > 0), default=0.0)
-        cheapest_url = next((u for n, u in urls if n in results and results[n][0] == cheapest_price), '')
+        cheapest_url = next((u for n, u in urls if n in results and abs(results[n][0] - cheapest_price) < 0.001), '')
         return (card, display_data, cheapest_price, cheapest_url, results)
+
 
     def open_cheapest_from_source(self, source):
         if not self.card_urls:
@@ -1157,35 +1720,60 @@ class MTGScraperGUI:
     def check_prices(self):
         self.tree.delete(*self.tree.get_children())
         self.card_urls.clear()
+        self._results_cache.clear()
         self.total_label.config(text='Total: AU $0.00')
         input_text = self.text_input.get('1.0', tk.END)
         cards = parse_decklist_from_input(input_text)
         total = 0.0
-        for i, card_info in enumerate(cards, start=1):
+
+        limiter = RateLimiter(3)  
+
+        for i, card in enumerate(cards, start=1):
             if self.stop_flag:
                 self.progress_label.config(text='Stopped.')
                 break
-            card_name, set_code, collector_number = card_info
-            card, display_data, cheapest, url, results = self.fetch_card_prices_parallel(card_name, set_code, collector_number)
+
+            card_key = card.strip().lower()
+            if card_key in self._results_cache:
+                display_data, cheapest, url, results = self._results_cache[card_key]
+            else:
+                limiter.wait()
+                card, display_data, cheapest, url, results = self.fetch_card_prices_parallel(card)
+                self._results_cache[card_key] = (display_data, cheapest, url, results)
+
             row = [card]
             for source in SCRAPER_CONFIG:
                 row.append(display_data.get(source, "--"))
+            row.append(f"{cheapest:.2f}")
+            # CK% comparison
+            ck_usd = get_ck_price(card)
+            if ck_usd and cheapest > 0:
+                ratio = ck_usd / cheapest  # >1 means we're cheaper than CK
+                pct = ratio * 100
+                ck_display = f"{pct:.0f}%"
+            else:
+                ck_display = "--"
+            row.append(ck_display)
+            iid = self.tree.insert('', 'end', values=tuple(row))
+            # Apply row tag for CK% colouring (done after insert)
+            if ck_usd and cheapest > 0:
+                self._apply_ck_tag(iid, ratio)
 
-            if not self.use_set_info.get():
-                row.append(f"{cheapest:.2f}")
-
-            self.tree.insert('', 'end', values=tuple(row))
             self.card_urls[card] = {
                 'Cheapest': url,
                 'Prices': {source: display_data.get(source, "--") for source in SCRAPER_CONFIG},
                 'URLs': {source: results.get(source, (0.0, "", ""))[2] if results.get(source) else "" for source in SCRAPER_CONFIG}
             }
+
             total += cheapest
             self.total_label.config(text=f'Total: AU ${total:.2f}')
             self.progress_label.config(text=f'Processing: {i}/{len(cards)}')
             self.root.update_idletasks()
+
         self.progress_label.config(text='Done' if not self.stop_flag else 'Stopped.')
         self.button.config(text='Search Prices', state='normal')
+        self.hareruya_lang_dropdown.config(state='readonly')
+        self.update_visible_columns()
         self.recalculate_cheapest_prices()
 
     def open_all_cheapest(self):
@@ -1201,59 +1789,193 @@ class MTGScraperGUI:
         messagebox.showinfo("Done", f"Opened {opened} links in your browser.")
 
     def save_to_excel(self):
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+
         if not self.card_urls:
             messagebox.showinfo("No Data", "You must search prices before saving.")
             return
 
-        # Get deck name for filename
-        deck_name = self.deck_var.get()
-        if not deck_name or deck_name == "Select saved deck":
-            deck_name = "MTG_Prices"
-        else:
-            # Clean deck name for filename
-            deck_name = re.sub(r'[<>:"/\\|?*]', '_', deck_name)
+        wb = Workbook()
 
-        # Create CSV content
-        import csv
-        import io
+        # ── Sheet 1: Summary ─────────────────────────────────────────────────
+        ws = wb.active
+        ws.title = "Price Summary"
 
-        # Build header with all store columns
-        header = ["Card"] + list(SCRAPER_CONFIG.keys()) + ["Cheapest Price", "Cheapest URL"]
+        FONT_NAME = "Arial"
+        HDR_FILL  = PatternFill("solid", start_color="1F4E79")   # dark blue
+        ALT_FILL  = PatternFill("solid", start_color="D9E1F2")   # light blue
+        GRN_FILL  = PatternFill("solid", start_color="E2EFDA")
+        RED_FILL  = PatternFill("solid", start_color="FCE4D6")
+        NEU_FILL  = PatternFill("solid", start_color="FFFFFF")
+        thin = Side(style="thin", color="AAAAAA")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-        csv_data = []
-        csv_data.append(header)
+        sources = list(SCRAPER_CONFIG.keys())
+        headers = ["Card", "Cheapest (AU$)", "Cheapest Source"] +                   [f"{s} (AU$)" for s in sources] +                   ["CK Price (USD)", "CK Ratio", "CK% vs AUD"]
 
+        # Write headers
+        for col_idx, h in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx, value=h)
+            cell.font = Font(name=FONT_NAME, bold=True, color="FFFFFF", size=10)
+            cell.fill = HDR_FILL
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = border
+        ws.row_dimensions[1].height = 30
+
+        # Determine cheapest source per card
+        def cheapest_source(card_name, cheapest_price_str):
+            try:
+                cheapest_val = float(str(cheapest_price_str).split()[0])
+            except:
+                return ""
+            urls_data = self.card_urls.get(card_name, {})
+            cheapest_url = urls_data.get("Cheapest", "")
+            for src in sources:
+                if urls_data.get("URLs", {}).get(src, "") == cheapest_url and cheapest_url:
+                    return src
+            return ""
+
+        rows_data = []
         for row_id in self.tree.get_children():
-            row = self.tree.item(row_id)['values']
+            row = self.tree.item(row_id)["values"]
             card = row[0]
-            card_data = [card]
-
-            # Add all store prices
-            prices = self.card_urls.get(card, {}).get('Prices', {})
-            urls = self.card_urls.get(card, {}).get('URLs', {})
-
-            for source in SCRAPER_CONFIG.keys():
-                price_str = prices.get(source, "--")
-                card_data.append(price_str)
-
-            # Add cheapest price and URL
-            cheapest_price = row[len(SCRAPER_CONFIG) + 1]
+            cheapest_price_str = row[len(SCRAPER_CONFIG) + 1]
+            try:
+                cheapest_val = float(str(cheapest_price_str).split()[0])
+            except:
+                cheapest_val = 0.0
+            src = cheapest_source(card, cheapest_price_str)
             cheapest_url = self.card_urls.get(card, {}).get("Cheapest", "")
-            card_data.extend([cheapest_price, cheapest_url])
 
-            csv_data.append(card_data)
+            source_prices = {}
+            for s in sources:
+                p_str = self.card_urls.get(card, {}).get("Prices", {}).get(s, "--")
+                try:
+                    source_prices[s] = float(str(p_str).split()[0])
+                except:
+                    source_prices[s] = None
 
-        # Save as CSV
-        filename = f"{deck_name}_Prices.csv"
+            ck_usd = get_ck_price(card)
+            rows_data.append((card, cheapest_val, src, cheapest_url, source_prices, ck_usd))
+
+        for r_idx, (card, cheapest_val, src, cheapest_url, source_prices, ck_usd) in enumerate(rows_data, 2):
+            fill = ALT_FILL if r_idx % 2 == 0 else NEU_FILL
+
+            col = 1
+            # Card name with hyperlink to cheapest
+            cell = ws.cell(row=r_idx, column=col, value=card)
+            if cheapest_url:
+                cell.hyperlink = cheapest_url
+                cell.font = Font(name=FONT_NAME, size=10, color="0563C1", underline="single")
+            else:
+                cell.font = Font(name=FONT_NAME, size=10)
+            cell.fill = fill; cell.border = border
+            col += 1
+
+            # Cheapest price
+            cell = ws.cell(row=r_idx, column=col, value=cheapest_val if cheapest_val > 0 else None)
+            cell.number_format = "$#,##0.00"
+            cell.font = Font(name=FONT_NAME, size=10, bold=True)
+            cell.fill = fill; cell.border = border; cell.alignment = Alignment(horizontal="center")
+            col += 1
+
+            # Cheapest source
+            cell = ws.cell(row=r_idx, column=col, value=src)
+            cell.font = Font(name=FONT_NAME, size=10)
+            cell.fill = fill; cell.border = border; cell.alignment = Alignment(horizontal="center")
+            col += 1
+
+            # Per-source prices
+            for s in sources:
+                price = source_prices.get(s)
+                src_url = self.card_urls.get(card, {}).get("URLs", {}).get(s, "")
+                cell = ws.cell(row=r_idx, column=col, value=price)
+                cell.number_format = "$#,##0.00"
+                cell.font = Font(name=FONT_NAME, size=10,
+                                 color="0563C1" if src_url else "000000",
+                                 underline="single" if src_url else "none")
+                if src_url:
+                    cell.hyperlink = src_url
+                if price and price == cheapest_val and cheapest_val > 0:
+                    cell.fill = GRN_FILL
+                else:
+                    cell.fill = fill
+                cell.border = border; cell.alignment = Alignment(horizontal="center")
+                col += 1
+
+            # CK USD price
+            cell = ws.cell(row=r_idx, column=col, value=ck_usd)
+            cell.number_format = "$#,##0.00"
+            cell.font = Font(name=FONT_NAME, size=10)
+            cell.fill = fill; cell.border = border; cell.alignment = Alignment(horizontal="center")
+            col += 1
+
+            # CK ratio and % (calculated in Python to avoid formula escaping issues)
+            ratio_fill = fill
+            ratio_val = None
+            pct_val = None
+            if ck_usd and cheapest_val > 0:
+                ratio_val = round(ck_usd / cheapest_val, 4)
+                pct_val = round(ratio_val - 1, 4)
+                if ratio_val >= 1.2:
+                    ratio_fill = GRN_FILL
+                elif ratio_val <= 0.8:
+                    ratio_fill = RED_FILL
+
+            cell = ws.cell(row=r_idx, column=col, value=ratio_val)
+            cell.number_format = '0.00"x"'
+            cell.font = Font(name=FONT_NAME, size=10)
+            cell.fill = ratio_fill; cell.border = border; cell.alignment = Alignment(horizontal="center")
+            col += 1
+
+            cell = ws.cell(row=r_idx, column=col, value=pct_val)
+            cell.number_format = "+0%;-0%;0%"
+            cell.font = Font(name=FONT_NAME, size=10)
+            cell.fill = ratio_fill; cell.border = border; cell.alignment = Alignment(horizontal="center")
+
+        # Total row
+        total_row = len(rows_data) + 2
+        ws.cell(row=total_row, column=1, value="TOTAL").font = Font(name=FONT_NAME, bold=True, size=10)
+        total_cell = ws.cell(row=total_row, column=2,
+                             value=f"=SUM(B2:B{total_row-1})")
+        total_cell.number_format = "$#,##0.00"
+        total_cell.font = Font(name=FONT_NAME, bold=True, size=11)
+        total_cell.fill = PatternFill("solid", start_color="1F4E79")
+        total_cell.font = Font(name=FONT_NAME, bold=True, color="FFFFFF", size=11)
+        total_cell.border = border
+
+        # Column widths
+        ws.column_dimensions["A"].width = 26
+        ws.column_dimensions["B"].width = 14
+        ws.column_dimensions["C"].width = 14
+        for i in range(4, 4 + len(sources)):
+            ws.column_dimensions[get_column_letter(i)].width = 13
+        ck_start = 4 + len(sources)
+        ws.column_dimensions[get_column_letter(ck_start)].width = 14
+        ws.column_dimensions[get_column_letter(ck_start+1)].width = 10
+        ws.column_dimensions[get_column_letter(ck_start+2)].width = 10
+        ws.freeze_panes = "A2"
+
+        # ── Sheet 2: Missing Cards ───────────────────────────────────────────
+        ws2 = wb.create_sheet("Missing Cards")
+        ws2.append(["Card Name"])
+        ws2["A1"].font = Font(name=FONT_NAME, bold=True, color="FFFFFF")
+        ws2["A1"].fill = HDR_FILL
+        ws2["A1"].border = border
+        missing = [self.missing_listbox.get(i) for i in range(self.missing_listbox.size())]
+        for card in missing:
+            ws2.append([card])
+        ws2.column_dimensions["A"].width = 30
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"MTG_Price_Report_{timestamp}.xlsx"
         filepath = os.path.join(os.path.expanduser("~/Downloads"), filename)
-
         try:
-            with open(filepath, 'w', newline='', encoding='utf-8') as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerows(csv_data)
-            messagebox.showinfo("Success", f"CSV file saved to:\n{filepath}")
+            wb.save(filepath)
+            messagebox.showinfo("Saved", f"Excel saved to:\n{filepath}")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to save CSV file:\n{e}")
+            messagebox.showerror("Error", f"Failed to save:\n{e}")
 
     def on_click(self, event):
         selected = self.tree.selection()
@@ -1261,31 +1983,14 @@ class MTGScraperGUI:
             return
 
         row_id = selected[0]
-        region = self.tree.identify_region(event.x, event.y)
-        column = self.tree.identify_column(event.x)
 
         if self.last_selected_row == row_id:
             item = self.tree.item(row_id)
             card_name = item['values'][0]
-
-            if self.use_set_info.get() and region == "cell" and column != '#1':
-                col_index = int(column.replace('#', '')) - 1
-                source_name = list(SCRAPER_CONFIG.keys())[col_index - 1]
-                url = self.card_urls.get(card_name, {}).get('URLs', {}).get(source_name, "")
-                price_str = self.card_urls.get(card_name, {}).get('Prices', {}).get(source_name, "--")
-
-                if url and price_str != "--":
-                    try:
-                        price = float(price_str)
-                        if price > 0:
-                            webbrowser.open_new_tab(url)
-                    except:
-                        pass
-            else:
-                urls = self.card_urls.get(card_name, {})
-                url = urls.get("Cheapest")
-                if url:
-                    webbrowser.open_new_tab(url)
+            urls = self.card_urls.get(card_name, {})
+            url = urls.get("Cheapest")
+            if url:
+                webbrowser.open_new_tab(url)
         else:
             self.last_selected_row = row_id
 
